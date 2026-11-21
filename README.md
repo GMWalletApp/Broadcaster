@@ -1,5 +1,5 @@
 <h1 align="center">Broadcaster</h1>
-<p align="center">Send a signed transaction to one of 18 mainnets and find out whether it landed and executed successfully.</p>
+<p align="center">Manage signed transactions across 18 mainnets and report the outcome to the service that submitted each one.</p>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 <p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">MIT</a></p>
 
@@ -7,9 +7,9 @@
 
 ## Why Broadcaster exists
 
-A wallet submits a transfer and the RPC times out. The node may already have the transaction. The wallet still needs to tell its user what happened to that payment.
+A payment service needs to know what happened to a transfer even if an RPC times out. Once it accepts the signed transaction, Broadcaster saves it in SQLite, sends it to up to three independent providers and tracks inclusion and execution. It resumes outstanding tasks after a restart.
 
-Broadcaster saves the signed bytes in SQLite and sends the same transaction to up to three independent RPC providers at once. It keeps checking the chain after a timeout and picks up outstanding tasks after a restart. The private key stays with the signer. The wallet can look up the result by hash or receive a signed webhook.
+Configure the submitting service’s HTTPS callback URL (`clients[].webhook`) and signing secret (`webhookSecret`). When the task ends, Broadcaster sends a signed `transaction.closed` event back to that service so it can update the order or notify the user. Broadcaster retries failed deliveries. [Callback signing and events (中文)](docs/api.zh-CN.md#故障恢复与上游事件)
 
 ## Submit an Ethereum transaction
 
@@ -24,20 +24,26 @@ TX_HASH=$(jq -n --arg raw "$SIGNED_TX" '{rawTransaction: $raw}' |
   jq -er '.txHash')
 ```
 
-The first submission returns HTTP 202 once Broadcaster has saved the transaction. Use the returned hash to check progress.
+HTTP 202 acknowledges that Broadcaster has accepted and saved the task. Tracking continues after an RPC accepts the transaction. A successful completion callback includes the following fields.
+
+```json
+{
+  "event": "transaction.closed",
+  "data": {
+    "taskState": "CLOSED",
+    "taskOutcome": "INCLUDED",
+    "executionStatus": "SUCCESS"
+  }
+}
+```
+
+The submitting service reads `INCLUDED` as evidence that the transaction landed, then checks `executionStatus`. A landed transaction can still report `FAILED`, or `UNKNOWN` while its execution result is unavailable. Deduplicate callbacks by `eventId`. To inspect progress or reconcile a result, look up the hash returned at submission.
 
 ```sh
 curl -fsS "$BASE/transactions/$TX_HASH?chainId=1" \
   -H "Authorization: Bearer $BROADCASTER_API_TOKEN" |
   jq '{taskState, taskOutcome, executionStatus}'
 ```
-
-| Result | What the wallet can tell its user |
-|---|---|
-| `taskState: QUEUED` | The transaction is waiting to be broadcast. |
-| `taskOutcome: INCLUDED`, `executionStatus: SUCCESS` | The transaction landed and executed successfully. |
-| `taskOutcome: INCLUDED`, `executionStatus: FAILED` | The transaction landed, but execution failed. |
-| `taskOutcome: INCLUDED`, `executionStatus: UNKNOWN` | The transaction landed. Check again for its execution result. |
 
 If settlement requires additional confirmations, the application waits for them according to its own policy.
 

@@ -1,5 +1,5 @@
 <h1 align="center">Broadcaster</h1>
-<p align="center">把签好的交易发往 18 条主网，查询它是否入块、执行是否成功。</p>
+<p align="center">管理 18 条主网上已签名交易的完整生命周期，将结果回传给提交交易的服务。</p>
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 <p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">MIT</a></p>
 
@@ -7,9 +7,9 @@
 
 ## 为什么做 Broadcaster
 
-钱包发起一笔转账，RPC 却超时了。节点可能已经收到了交易，只是响应没回来。这时，钱包需要知道原来那笔交易后来怎么样了。
+付款服务提交一笔签好的交易后，即使 RPC 超时，也需要知道这笔付款最终有没有上链。Broadcaster 接手后把签名原文存入 SQLite，向最多三家独立供应商并发广播，并持续核查入块和执行结果。进程重启后会接着处理原任务。
 
-Broadcaster 先把签名原文存到 SQLite，再把同一笔交易同时发给最多三家独立的 RPC 供应商。即使某家超时，服务也会继续查链；进程重启后会接着处理原任务。私钥留在签名方，钱包可以按交易哈希查结果，也可以接收带签名的 Webhook。
+接入时，为提交方配置 HTTPS 回调地址（`clients[].webhook`）和签名密钥（`webhookSecret`）。任务结束时，Broadcaster 会主动把 `transaction.closed` 事件发回该服务。提交方据此更新订单或通知用户；回调投递失败时，Broadcaster 会重试。[回调签名与事件](docs/api.zh-CN.md#故障恢复与上游事件)
 
 ## 提交一笔以太坊交易
 
@@ -24,20 +24,26 @@ TX_HASH=$(jq -n --arg raw "$SIGNED_TX" '{rawTransaction: $raw}' |
   jq -er '.txHash')
 ```
 
-首次提交返回 HTTP 202，表示服务已记下这笔交易。可以用返回的哈希查进度。
+首次提交返回 HTTP 202，表示 Broadcaster 已受理并保存任务。节点接收交易后，Broadcaster 继续跟踪。成功路径的结束回调包含以下字段（节选）。
+
+```json
+{
+  "event": "transaction.closed",
+  "data": {
+    "taskState": "CLOSED",
+    "taskOutcome": "INCLUDED",
+    "executionStatus": "SUCCESS"
+  }
+}
+```
+
+提交方看到 `INCLUDED` 就知道交易已入块，再看 `executionStatus` 判断执行结果。`FAILED` 表示已入块但执行失败，`UNKNOWN` 表示执行结果仍待核实。回调接收方按 `eventId` 去重。需要排查进度或补查结果时，可以用提交时返回的哈希查询。
 
 ```sh
 curl -fsS "$BASE/transactions/$TX_HASH?chainId=1" \
   -H "Authorization: Bearer $BROADCASTER_API_TOKEN" |
   jq '{taskState, taskOutcome, executionStatus}'
 ```
-
-| 查到的结果 | 钱包可以告诉用户什么 |
-|---|---|
-| `taskState: QUEUED` | 交易已排队，正在等待广播。 |
-| `taskOutcome: INCLUDED`，`executionStatus: SUCCESS` | 交易已入块，执行成功。 |
-| `taskOutcome: INCLUDED`，`executionStatus: FAILED` | 交易已入块，但链上执行失败。 |
-| `taskOutcome: INCLUDED`，`executionStatus: UNKNOWN` | 已看到交易入块，稍后再查执行结果。 |
 
 如果付款需要等待多个确认，业务方按自己的结算规则继续等待。[完整状态机](docs/api.zh-CN.md#evm-交易生命周期)
 
