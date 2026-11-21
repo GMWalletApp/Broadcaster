@@ -1,0 +1,80 @@
+{
+  "listen": "127.0.0.1:8080",
+  "workers": 4,
+  "trackingHours": 24,
+  "networks": {
+    "1": {
+      "family": "evm",
+      "publicNodeProbeFile": "",
+      "entryPoints": [
+        "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+      ]
+    },
+    "42161": {
+      "family": "evm"
+    },
+    "56": {
+      "family": "evm"
+    },
+    "43114": {
+      "family": "evm"
+    },
+    "137": {
+      "family": "evm"
+    },
+    "10": {
+      "family": "evm"
+    },
+    "8453": {
+      "family": "evm"
+    },
+    "999": {
+      "family": "evm"
+    },
+    "143": {
+      "family": "evm"
+    },
+    "5042": {
+      "family": "evm"
+    },
+    "9745": {
+      "family": "evm"
+    },
+    "4663": {
+      "family": "evm"
+    },
+    "solana": {
+      "family": "solana",
+      "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "feePayers": [
+        "${SOLANA_FEE_PAYER}"
+      ]
+    },
+    "bitcoin": {
+      "family": "bitcoin"
+    },
+    "tron": {
+      "family": "tron"
+    },
+    "sui": {
+      "family": "sui"
+    },
+    "aptos": {
+      "family": "aptos"
+    },
+    "ton": {
+      "family": "ton"
+    }
+  },
+  "clients": [
+    {
+      "name": "wallet",
+      "token": "${BROADCASTER_API_TOKEN}"
+    },
+    {
+      "name": "operations",
+      "token": "${BROADCASTER_ADMIN_TOKEN}",
+      "admin": true
+    }
+  ]
+}

@@ -224,8 +224,8 @@ func (s *Store) submit(ctx context.Context, t Task, v Version) (Task, bool, erro
 	created := false
 	e := s.atomic(ctx, func(tx *sql.Tx) error {
 		// A closed task frees the queue slot but keeps ownership of all its hashes.
-		if t.Family == EVM {
-			known, err := find(ctx, tx, t.Owner, EVM, t.Network, v.Hash)
+		if t.Family != Solana {
+			known, err := find(ctx, tx, t.Owner, t.Family, t.Network, v.Hash)
 			if err == nil {
 				t = known
 				return nil

@@ -72,13 +72,17 @@ func readConfig(path string) (broadcast.Config, error) {
 			if _, e := sol.HashFromBase58(n.GenesisHash); e != nil || name == "" || len(n.FeePayers) == 0 {
 				return c, errors.New("configure cluster genesis and fee payers")
 			}
-			for _, p := range n.FeePayers {
+			for i, p := range n.FeePayers {
+				p = os.ExpandEnv(p)
+				n.FeePayers[i] = p
 				if _, e := sol.PublicKeyFromBase58(p); e != nil {
 					return c, errors.New("invalid fee payer")
 				}
 			}
 		default:
-			return c, fmt.Errorf("invalid family for network %s", name)
+			if !broadcast.IsNative(n.Family) || name != string(n.Family) {
+				return c, fmt.Errorf("invalid family for network %s", name)
+			}
 		}
 	}
 	names, tokens := map[string]bool{}, map[string]bool{}

@@ -38,6 +38,9 @@ func decodeEVM(raw string) (Task, Version, error) {
 	if tx.Gas() < minimumGas(&tx) || tx.Nonce() == math.MaxUint64 || tx.GasFeeCap().BitLen() > 256 || tx.GasTipCap().BitLen() > 256 || tx.GasFeeCap().Cmp(tx.GasTipCap()) < 0 {
 		return t, v, invalid("invalid nonce, gas limit or fee caps")
 	}
+	if tx.Type() == types.SetCodeTxType && !supportsSetCode(tx.ChainId().String()) {
+		return t, v, invalid("Type 4 transactions are unavailable on this network")
+	}
 	if tx.Type() == types.SetCodeTxType && len(tx.SetCodeAuthorizations()) == 0 {
 		return t, v, invalid("empty authorization list")
 	}
@@ -169,3 +172,6 @@ func decodeSolana(r SolanaRequest, n Network) (Task, Version, error) {
 	t = Task{Family: Solana, Network: r.Cluster, Sender: m.AccountKeys[0].String(), Payment: r.Payment, State: "READY"}
 	return t, v, nil
 }
+
+// HyperEVM mainnet runs the Cancun rules without SetCode transactions.
+func supportsSetCode(chain string) bool { return chain != "999" }

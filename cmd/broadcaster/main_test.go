@@ -50,3 +50,27 @@ func TestExampleConfigResolvesSecrets(t *testing.T) {
 		})
 	}
 }
+
+func TestChainScannerMainnetConfig(t *testing.T) {
+	t.Setenv("BROADCASTER_API_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("BROADCASTER_ADMIN_TOKEN", strings.Repeat("b", 32))
+	const payer = "11111111111111111111111111111111"
+	t.Setenv("SOLANA_FEE_PAYER", payer)
+	c, err := readConfig("../../config.mainnets.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Networks) != 18 || c.Networks["solana"].FeePayers[0] != payer {
+		t.Fatal("mainnet inventory or payer mismatch")
+	}
+	for _, id := range strings.Fields("1 42161 56 43114 137 10 8453 999 143 5042 9745 4663") {
+		if c.Networks[id].Family != "evm" {
+			t.Fatal(id)
+		}
+	}
+	for _, network := range strings.Fields("bitcoin tron sui aptos ton solana") {
+		if string(c.Networks[network].Family) != network {
+			t.Fatal(network)
+		}
+	}
+}

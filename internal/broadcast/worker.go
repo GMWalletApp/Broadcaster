@@ -395,7 +395,7 @@ func (s *Service) process(ctx context.Context, t *Task, token string) error {
 	observation, cancel := context.WithTimeout(ctx, 45*time.Second)
 	u := s.observe(observation, t, ps)
 	cancel()
-	if t.Family == EVM && u.state != "CLOSED" && time.Since(t.Created) > time.Duration(s.cfg.TrackingHours)*time.Hour {
+	if t.Family != Solana && u.state != "CLOSED" && time.Since(t.Created) > time.Duration(s.cfg.TrackingHours)*time.Hour {
 		u = update{state: "CLOSED", outcome: "EXPIRED", reason: "TRACKING_DEADLINE", evidence: bodyJSON(map[string]any{"lastState": u.state, "lastReason": u.reason, "lastEvidence": u.evidence})}
 	}
 	if u.send {

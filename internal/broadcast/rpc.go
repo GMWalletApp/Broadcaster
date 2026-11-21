@@ -169,6 +169,9 @@ func classify(err error) sendResult {
 }
 
 func (s *Service) send(ctx context.Context, p Endpoint, f Family, v Version) sendResult {
+	if a := nativeAdapters[f]; a != nil {
+		return classify(a.send(ctx, s, p, v))
+	}
 	method := "eth_sendRawTransaction"
 	params := []any{v.Raw}
 	if f == Solana {

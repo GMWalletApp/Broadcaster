@@ -33,7 +33,9 @@ func (s *Service) observe(ctx context.Context, task *Task, endpoints []Endpoint)
 				for n := range v.task.Versions {
 					v.task.Versions[n].Authorizations = slices.Clone(task.Versions[n].Authorizations)
 				}
-				if task.Family == EVM {
+				if a := nativeAdapters[task.Family]; a != nil {
+					v.next, v.err = a.lookup(ctx, s, v.endpoint, v.task.Active)
+				} else if task.Family == EVM {
 					v.next, v.err = s.observeEVM(ctx, v.endpoint, &v.task)
 				} else {
 					v.next, v.err = s.observeSolana(ctx, v.endpoint, &v.task)
@@ -73,6 +75,13 @@ func (s *Service) observe(ctx context.Context, task *Task, endpoints []Endpoint)
 		for _, v := range views {
 			if v.err == nil && v.next.state == "CLOSED" && (v.next.winner != next.winner || v.next.consuming != next.consuming || differentExecutions(next, v.next)) {
 				return update{state: "RESOLVING_NONCE", reason: "CHAIN_VIEW_CONFLICT"}
+			}
+		}
+	}
+	if IsNative(task.Family) && next.state == "CLOSED" {
+		for _, v := range views {
+			if v.err == nil && v.next.state == "CLOSED" && (differentExecutions(next, v.next) || string(v.next.evidence) != string(next.evidence)) {
+				return update{state: "TRACKING", reason: "CHAIN_VIEW_CONFLICT"}
 			}
 		}
 	}

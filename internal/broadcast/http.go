@@ -41,6 +41,8 @@ func (s *Service) Handler() http.Handler {
 			respondError(w, &Fault{401, "UNAUTHORIZED", ""})
 		})
 	}
+	bind("POST /networks/{network}/transactions", false, s.nativeTransactions)
+	bind("GET /networks/{network}/transactions/{hash}", false, s.nativeTransactions)
 	bind("POST /transactions", false, s.evmSubmit)
 	bind("POST /transactions/{hash}/replacement", false, s.evmSubmit)
 	bind("GET /transactions/{hash}", false, s.getTask(EVM))

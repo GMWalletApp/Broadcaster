@@ -75,11 +75,15 @@ type ProviderInput struct {
 	Bearer   *string `json:"bearer"`
 	Enabled  *bool   `json:"enabled"`
 	// Admin-supplied signed probes are real submissions. They are never logged.
+	NativeProbe *NativeRequest `json:"nativeProbe"`
 	EVMProbes   []string       `json:"evmProbes"`
 	SolanaProbe *SolanaRequest `json:"solanaProbe"`
 }
 
 func (s *Service) height(ctx context.Context, p Endpoint) (int64, error) {
+	if a := nativeAdapters[s.cfg.Networks[p.Network].Family]; a != nil {
+		return a.height(ctx, s, p)
+	}
 	if s.cfg.Networks[p.Network].Family == Solana {
 		var h *int64
 		e := s.call(ctx, p, "getBlockHeight", []any{map[string]string{"commitment": "confirmed"}}, &h)
@@ -98,6 +102,29 @@ func (s *Service) height(ctx context.Context, p Endpoint) (int64, error) {
 
 func (s *Service) admit(ctx context.Context, p Endpoint, input ProviderInput) error {
 	n := s.cfg.Networks[p.Network]
+	if a := nativeAdapters[n.Family]; a != nil {
+		if n.Family == Bitcoin {
+			var indexes map[string]struct{ Synced bool }
+			if err := s.call(ctx, p, "getindexinfo", []any{"txindex"}, &indexes); err != nil || !indexes["txindex"].Synced {
+				return invalid("Bitcoin requires a synced txindex")
+			}
+		}
+		if input.NativeProbe == nil {
+			return invalid("signed nativeProbe required")
+		}
+		v, err := decodeNative(n.Family, *input.NativeProbe)
+		if err != nil {
+			return err
+		}
+		if _, err = a.lookup(ctx, s, p, v.Hash); err != nil {
+			return invalid("native transaction lookup unavailable")
+		}
+		r := s.send(ctx, p, n.Family, v)
+		if r.state != "ACCEPTED" && r.state != "ALREADY_KNOWN" {
+			return invalid("native broadcast probe failed: " + r.detail)
+		}
+		return nil
+	}
 	if n.Family == EVM {
 		var chain hexutil.Big
 		if e := s.call(ctx, p, "eth_chainId", []any{}, &chain); e != nil || chain.ToInt().String() != p.Network {
@@ -128,7 +155,10 @@ func (s *Service) admit(ctx context.Context, p Endpoint, input ProviderInput) er
 			}
 			verified = append(verified, v)
 		}
-		if !probes["type4"] || !probes["ordinary"] {
+		if !probes["ordinary"] {
+			return invalid("ordinary signed admission probe required")
+		}
+		if supportsSetCode(p.Network) && !probes["type4"] {
 			return invalid("ordinary and Type 4 signed admission probes required")
 		}
 		for _, addr := range n.EntryPoints {
