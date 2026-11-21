@@ -67,7 +67,7 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 ./broadcaster -config config.json -db broadcaster.db
 ```
 
-To enable the bundled Ethereum endpoint, put the signed admission probes in `probes/1.json` before startup, or register the provider later through the admin API. Admission broadcasts those probes on mainnet. [Probe format and provider setup (中文)](docs/api.zh-CN.md#publicnode-默认节点)
+To enable the bundled Ethereum endpoint, put the signed admission probes in `probes/1.json` before startup, or register the provider later through the admin API. Admission broadcasts those probes on mainnet. [Probe format and provider setup (中文)](docs/api.zh-CN.md#内置主网节点)
 
 ## Supported networks
 
@@ -81,11 +81,15 @@ On EVM, a signer can ask for the next available nonce. If the chain returns 20 a
 
 ## Production providers
 
-PublicNode is the only bundled provider. Each network broadcasts through as many healthy independent providers as it has available, up to three per round.
+Each of the 18 mainnets has one preset. After admission, Broadcaster sends through up to three independent healthy providers per round. Register additional providers privately for production.
 
-| For three providers per network | What to configure |
+| Network | Bundled provider |
 |---|---|
-| The 15 networks with a PublicNode preset | Enable PublicNode and privately register two additional providers. |
-| Monad, Plasma and TON | Register three providers for each network. These networks have no PublicNode mainnet preset. |
+| 15 mainnets | PublicNode |
+| Monad | Monad Foundation · `https://rpc-mainnet.monadinfra.com` |
+| Plasma | Plasma public RPC · `https://rpc.plasma.to` |
+| TON | TON Center · `https://toncenter.com` (v2 writes and v3 lookups) |
 
-Broadcaster prefers MEV-Protected endpoints. If a transaction also goes to an ordinary RPC, that copy can reach the public mempool. [PublicNode routes and protection labels (中文)](docs/api.zh-CN.md#publicnode-默认节点) · [18-network configuration](config.mainnets.json)
+The three public endpoints are rate-limited. Monad Foundation designates its public endpoint for development. [Monad network information](https://docs.monad.xyz/developer-essentials/network-information)
+
+Broadcaster prefers MEV-Protected endpoints. If a transaction also goes to an ordinary RPC, that copy can reach the public mempool. [PublicNode routes and protection labels (中文)](docs/api.zh-CN.md#内置主网节点) · [18-network configuration](config.mainnets.json)

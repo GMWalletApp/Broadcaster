@@ -236,10 +236,14 @@ func (s *Service) configure(ctx context.Context, key string, in ProviderInput) (
 	if in.Network == "" {
 		in.Network = in.Chain
 	}
-	if key == "" && strings.EqualFold(in.Provider, publicNode) && in.URL == nil {
-		return s.newPublicNode(ctx, in.Network, in)
+	if key == "" && in.URL == nil {
+		preset, ok := s.preset(in.Network)
+		if !ok || !strings.EqualFold(in.Provider, preset.Provider) {
+			return Endpoint{}, invalid("specify a URL or the network's default providerId")
+		}
+		return s.newDefault(ctx, preset, in)
 	}
-	if strings.HasPrefix(key, publicNode+":") && (in.Network != "" || in.Provider != "" || in.URL != nil || in.Bearer != nil) {
+	if strings.Contains(key, ":") && (in.Network != "" || in.Provider != "" || in.URL != nil || in.Bearer != nil) {
 		return Endpoint{}, invalid("the default route is fixed; use a separate endpoint for custom settings")
 	}
 	return s.saveProvider(ctx, key, "", in)
@@ -290,8 +294,8 @@ func (s *Service) saveProvider(ctx context.Context, key, defaultID string, in Pr
 		p.secret.MEVProtected = false
 	}
 	if in.MEVProtected != nil {
-		if isPublicNodeURL(u) {
-			return p, invalid("PublicNode protection is set by the built-in catalog")
+		if catalogOperator(u) != "" {
+			return p, invalid("default route protection is set by the built-in catalog")
 		}
 		p.secret.MEVProtected = *in.MEVProtected
 	}

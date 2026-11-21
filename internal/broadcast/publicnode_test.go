@@ -169,7 +169,7 @@ func TestPreferredPublicNodeCountsOnceAndHonorsCooldown(t *testing.T) {
 	}
 }
 
-func TestMainnetPublicNodeCatalog(t *testing.T) {
+func TestMainnetPresetCatalog(t *testing.T) {
 	raw, err := os.ReadFile("../../config.mainnets.json")
 	if err != nil {
 		t.Fatal(err)
@@ -180,50 +180,56 @@ func TestMainnetPublicNodeCatalog(t *testing.T) {
 	}
 	s := must(New(cfg, nil, make([]byte, 32)))
 	protected := map[string]bool{"1": true, "56": true, "8453": true, "42161": true, "4663": true, "5042": true, "solana": true}
-	absent := map[string]bool{"ton": true, "143": true, "9745": true}
-	if got := len(s.defaultProviders("")); got != 15 {
+	official := map[string]string{"143": "monad-foundation", "9745": "plasma", "ton": "toncenter"}
+	if got := len(s.defaultProviders("")); got != 18 {
 		t.Fatal(got)
 	}
 	for name, n := range cfg.Networks {
-		r, ok := s.publicRoute(name)
-		if ok == absent[name] {
-			t.Fatal(name, r)
+		preset, ok := s.preset(name)
+		u, err := url.Parse(preset.URL)
+		want := official[name]
+		if want == "" {
+			want = publicNode
 		}
-		if !ok {
-			if n.PublicNodeProbeFile != "" {
-				t.Fatal(name, n.PublicNodeProbeFile)
-			}
-			continue
-		}
-		u, err := url.Parse(r.URL)
-		if err != nil || u.Scheme != "https" || !isPublicNodeURL(u) || r.MEVProtected != protected[name] || n.PublicNodeProbeFile != "probes/"+name+".json" {
-			t.Fatal(name, r, n.PublicNodeProbeFile)
+		if !ok || err != nil || u.Scheme != "https" || catalogOperator(u) != want || preset.Provider != want || preset.MEVProtected != protected[name] || n.DefaultProbeFile != "probes/"+name+".json" {
+			t.Fatal(name, preset, n.DefaultProbeFile)
 		}
 	}
 }
 
-func TestPublicNodeNativeProbeFile(t *testing.T) {
-	s := service(t, filepath.Join(t.TempDir(), "db"))
-	s.cfg.Networks["bitcoin"] = Network{Family: Bitcoin}
-	f := newNativeFixture(t, Bitcoin)
-	s.http.Transport = fixtureTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.String() != "https://bitcoin-rpc.publicnode.com" {
-			t.Fatal(r.URL)
-		}
-		w := httptest.NewRecorder()
-		f.serve(w, r)
-		return w.Result(), nil
-	})
-	path := filepath.Join(t.TempDir(), "bitcoin.json")
-	if err := os.WriteFile(path, bodyJSON(admissionProbes{NativeProbe: &f.in}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.admitDefaultFile(t.Context(), "bitcoin", path); err != nil {
-		t.Fatal(err)
-	}
-	p := must(s.storedDefault(t.Context(), "bitcoin"))
-	if p.Provider != publicNode || p.MEVProtected || !p.Enabled || f.writes.Load() != 1 {
-		t.Fatal(p)
+func TestNativePresetAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		family         Family
+		provider, host string
+	}{
+		{Bitcoin, publicNode, "bitcoin-rpc.publicnode.com"},
+		{TON, "toncenter", "toncenter.com"},
+	} {
+		t.Run(string(tc.family), func(t *testing.T) {
+			s := service(t, filepath.Join(t.TempDir(), "db"))
+			network := string(tc.family)
+			s.cfg.Networks[network] = Network{Family: tc.family}
+			f := newNativeFixture(t, tc.family)
+			s.http.Transport = fixtureTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Scheme != "https" || r.URL.Host != tc.host {
+					t.Fatal(r.URL)
+				}
+				w := httptest.NewRecorder()
+				f.serve(w, r)
+				return w.Result(), nil
+			})
+			path := filepath.Join(t.TempDir(), network+".json")
+			if err := os.WriteFile(path, bodyJSON(admissionProbes{NativeProbe: &f.in}), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.admitDefaultFile(t.Context(), network, path); err != nil {
+				t.Fatal(err)
+			}
+			p := must(s.storedDefault(t.Context(), network))
+			if p.Provider != tc.provider || p.ID != tc.provider+":"+network || p.MEVProtected || !p.Enabled || f.writes.Load() != 1 {
+				t.Fatal(p)
+			}
+		})
 	}
 }
 

@@ -50,10 +50,13 @@ func readConfig(path string) (broadcast.Config, error) {
 		return c, errors.New("configure at least one network and one client")
 	}
 	for name, n := range c.Networks {
-		if n.PublicNodeProbeFile != "" && !filepath.IsAbs(n.PublicNodeProbeFile) {
-			n.PublicNodeProbeFile = filepath.Join(filepath.Dir(path), n.PublicNodeProbeFile)
-			c.Networks[name] = n
+		if n.DefaultProbeFile == "" {
+			n.DefaultProbeFile = n.PublicNodeProbeFile
 		}
+		if n.DefaultProbeFile != "" && !filepath.IsAbs(n.DefaultProbeFile) {
+			n.DefaultProbeFile = filepath.Join(filepath.Dir(path), n.DefaultProbeFile)
+		}
+		c.Networks[name] = n
 		if n.MaxHeightLag < 0 || n.StallSeconds < 0 {
 			return c, fmt.Errorf("invalid health thresholds for %s", name)
 		}

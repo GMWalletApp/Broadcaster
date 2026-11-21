@@ -23,6 +23,7 @@ type Network struct {
 	GenesisHash         string   `json:"genesisHash,omitempty"`
 	FeePayers           []string `json:"feePayers,omitempty"`
 	EntryPoints         []string `json:"entryPoints,omitempty"`
+	DefaultProbeFile    string   `json:"defaultProbeFile,omitempty"`
 	PublicNodeProbeFile string   `json:"publicNodeProbeFile,omitempty"`
 	MaxHeightLag        int64    `json:"maxHeightLag,omitempty"`
 	StallSeconds        int      `json:"stallSeconds,omitempty"`

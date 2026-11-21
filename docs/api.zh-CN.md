@@ -31,14 +31,14 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 
 本节所有接口使用大写 `/EVM` 前缀。旧客户端可继续使用原有的无前缀路径。交易提交和管理操作需要鉴权，查询和变更限定在调用方有权访问的任务或账户内。POST 和 PATCH 的请求体使用 JSON。下表中的 rawTransaction 是完整的十六进制已签名原文。Hash 路径支持用 chainId 查询参数限定网络；出现跨链歧义时必须指定链。
 
-| 方法与路径 | 输入 | 响应与副作用 |
-|---|---|---|
-| `POST /EVM/transactions` | rawTransaction | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由其他活动任务占用时返回 409 NONCE_CONFLICT。 |
-| `GET /EVM/transactions/{hash}` | 原始或替换 Hash | 返回 200，包含任务阶段和结果、所查 Hash 的状态、当前调度版本、全部候选、各轮各节点结果、链上证据及 7702 诊断。未知或不可见的 Hash 返回 404。 |
-| `POST /EVM/transactions/{hash}/force` | reason | 对当前可调度版本立即安排一轮广播，记录操作者、时间和原因，返回 202。只跳过本地 Nonce 排序，仍受节点冷却、可用性及链上状态约束。同一轮已排队或在途时复用该轮。 |
-| `POST /EVM/transactions/{hash}/replacement` | rawTransaction | 用路径指定待替换的当前版本。新签名交易通过校验，且 chainId、sender、nonce 相同后，在原任务下登记新 Hash，返回 202。重复提交同一已登记替换版本返回 200。原 Hash 继续接受链上监控。 |
-| `GET /EVM/accounts/{address}/queue?chainId=…` | 地址、目标链 | 按外层 Nonce 升序返回未关闭任务、当前版本、排队原因和下次调度时间。队列只列已接收的任务。 |
-| `GET /EVM/accounts/{address}/nonce?chainId=…` | 地址、目标链，可选 blockTag（latest 或 pending） | 返回最新链上 chainNonce 及结合队列的推荐 nonce。指定 pending 时还返回同一节点的 pendingNonce。均为十进制字符串。所有节点读取失败返回 503 NONCE_VIEW_UNAVAILABLE。 |
+| 功能 | 方法与路径 | 输入 | 响应与状态变化 |
+|---|---|---|---|
+| 提交已签名交易并开始跟踪 | `POST /EVM/transactions` | rawTransaction | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由其他活动任务占用时返回 409 NONCE_CONFLICT。 |
+| 按哈希查询进度与执行结果 | `GET /EVM/transactions/{hash}` | 原始或替换 Hash | 返回 200，包含任务阶段和结果、所查 Hash 的状态、当前调度版本、全部候选、各轮各节点结果、链上证据及 7702 诊断。未知或不可见的 Hash 返回 404。 |
+| 跳过本地 Nonce 排序，立即安排广播 | `POST /EVM/transactions/{hash}/force` | reason | 对当前可调度版本立即安排一轮广播，记录操作者、时间和原因，返回 202。只跳过本地 Nonce 排序，仍受节点冷却、可用性及链上状态约束。同一轮已排队或在途时复用该轮。 |
+| 用同一 Nonce 的新签名交易替换当前版本 | `POST /EVM/transactions/{hash}/replacement` | rawTransaction | 用路径指定待替换的当前版本。新签名交易通过校验，且 chainId、sender、nonce 相同后，在原任务下登记新 Hash，返回 202。重复提交同一已登记替换版本返回 200。原 Hash 继续接受链上监控。 |
+| 查看账户中等待处理的交易 | `GET /EVM/accounts/{address}/queue?chainId=…` | 地址、目标链 | 按外层 Nonce 升序返回未关闭任务、当前版本、排队原因和下次调度时间。队列只列已接收的任务。 |
+| 查询签名时可用的下一个 Nonce | `GET /EVM/accounts/{address}/nonce?chainId=…` | 地址、目标链，可选 blockTag（latest 或 pending） | 返回最新链上 chainNonce 及结合队列的推荐 nonce。指定 pending 时还返回同一节点的 pendingNonce。均为十进制字符串。所有节点读取失败返回 503 NONCE_VIEW_UNAVAILABLE。 |
 
 **冲突与错误。** 原文无法解码、签名无效、链未启用或整笔交易违反协议规则时，提交返回 4xx 和具体原因，校验失败的请求不占用 Nonce。已有 Hash 的幂等查询优先于依赖当前链状态的预检，先校验调用方访问权限。活动 EVM 任务的唯一键为 (chainId, sender, nonce)，签名交易以 (chainId, txHash) 去重。Hash 幂等检查与新任务插入在同一事务内完成，唯一键冲突时重新读取已提交的任务作判定。并发 replacement 使用当前版本的条件更新；对过时版本提交不同的新 Hash、在核查 Nonce 消耗者或已关闭时尝试替换，以及对不可调度版本执行 force，均返回 409 和原因。已关闭任务保留提交历史及终止结果。
 
@@ -91,17 +91,20 @@ flowchart TD
 
 每个端点归属于一个稳定的 providerId 和一条链。同一供应商的多个域名、密钥或端点只占一路。每个 EVM 网络使用独立的节点池，可组合 PublicNode 和自购端点，所有端点须能广播普通 EVM 交易及该链配置启用的交易类型。除采用 Cancun 规则的 HyperEVM（999）外，准入另需通过 EIP-7702 Type 4 广播探针。配置了 EntryPoint 的链还须通过相应的 ERC-4337 外层交易探针。4337 外层交易调用目标链的 EntryPoint 合约，经 eth_sendRawTransaction 提交。面向钱包的 eth_sendUserOperation 由独立 Bundler 提供。
 
-| 方法与路径 | 行为 |
-|---|---|
-| POST /rpc-providers | 管理员提交 providerId、chainId、端点和凭证配置。验证实际 chainId、鉴权、查询与广播权限、普通交易和该链启用的 Type 4 广播能力，以及对已配置 EntryPoint 的 4337 外层交易广播权限。全部通过才登记启用并返回 201。失败或能力无法证实时返回具体检查项与原因。 |
-| GET /rpc-providers?chainId=… | 返回供应商和端点标识、启停状态、最近高度及观测时间、读和广播健康状况、失败计数、冷却截止时间与最近错误。凭证与 URL 中的密钥须脱敏。 |
-| PATCH /rpc-providers/{id} | 以端点记录 ID 修改配置或启停。端点、凭证或链变更时先重新准入，检查通过后原子切换；失败时原配置继续生效。停用后停止分配新请求。 |
+| 功能 | 方法与路径 | 行为 |
+|---|---|---|
+| 验证并登记供应商节点 | POST /rpc-providers | 管理员提交 providerId、chainId、端点和凭证配置。验证实际 chainId、鉴权、查询与广播权限、普通交易和该链启用的 Type 4 广播能力，以及对已配置 EntryPoint 的 4337 外层交易广播权限。全部通过才登记启用并返回 201。失败或能力无法证实时返回具体检查项与原因。 |
+| 查看节点健康与熔断状态 | GET /rpc-providers?chainId=… | 返回供应商和端点标识、启停状态、最近高度及观测时间、读和广播健康状况、失败计数、冷却截止时间与最近错误。凭证与 URL 中的密钥须脱敏。 |
+| 修改、启用或停用节点 | PATCH /rpc-providers/{id} | 以端点记录 ID 修改配置或启停。端点、凭证或链变更时先重新准入，检查通过后原子切换；失败时原配置继续生效。停用后停止分配新请求。 |
+| 查看各链内置节点 | GET /rpc-providers/defaults?network=… | 返回配置网络的默认地址、providerId 和 MEV 保护标记。省略 network 时列出全部预设。 |
 
 准入须有目标端点和对应凭证的能力证据。例如可使用运维提供的受控已签名测试交易，验证对应写接口接受该类型；费用及链上副作用须在准入测试安排中明确。对 4337，按目标链登记 Bundler 使用的 EntryPoint 地址和版本，核对合约部署，并验证执行端点允许发送有效的、调用该 EntryPoint 的已签名 bundle。查高度成功、能读取历史 Type 4 交易或收到通用参数错误，均不足以证明该端点有 Type 4 广播权限。
 
 Solana 按集群单独建池。准入时用 getGenesisHash 核对集群，验证凭证、sendTransaction 写权限以及交易状态、历史和区块高度查询能力。以 getBlockHeight 和节点进度做读侧健康检查。18 条链共用下述供应商去重、广播熔断、半开试发及恢复规则。
 
-### PublicNode 默认节点
+<a id="publicnode-默认节点"></a>
+
+### 内置主网节点
 
 内置以下主网端点。管理员可通过 `GET /rpc-providers/defaults` 查看当前配置网络的默认 URL 和 `mevProtected` 标记；可选 `?network=1` 过滤。EVM 按 chain ID 匹配，Solana 按 mainnet-beta 的 genesis hash 匹配，配置中的集群名称可自定义。保护标记来自供应商对相应 HTTPS RPC 地址的公开说明。[PublicNode 官方端点目录](https://www.publicnode.com/)
 
@@ -123,13 +126,21 @@ Solana 按集群单独建池。准入时用 getGenesisHash 核对集群，验证
 | Polygon PoS · 137 | `https://polygon-bor-rpc.publicnode.com` | 普通 RPC |
 | Avalanche C-Chain · 43114 | `https://avalanche-c-chain-rpc.publicnode.com` | 普通 RPC |
 
-公开版本只提供 PublicNode 的节点地址。Monad、Plasma 和 TON 在 PublicNode 官方目录暂无主网端点。生产部署若需每链三路，已提供预设的链再登记两家独立供应商，其余三条各登记三家。付费地址和凭证通过私有管理接口登记，保存于部署环境的数据库。
+另外三条主网使用项目或官方 API 提供方公布的地址，均按普通广播端点调度。
 
-**启用。** 向 `POST /rpc-providers` 提交 `providerId: "publicnode"`、目标 `network` 和该链的签名准入探针即可，URL 自动选择。例如以太坊请求体形如 `{"providerId":"publicnode","network":"1","evmProbes":["0x…","0x…","0x…"]}`。首次通过全部检查后进入调度池；重复提交返回原记录。运行中的节点和启停状态可通过 `GET /rpc-providers` 查询。
+| 网络 | providerId | HTTPS 地址 | 官方资料 |
+|---|---|---|---|
+| Monad · 143 | `monad-foundation` | `https://rpc-mainnet.monadinfra.com` | [Monad Foundation 公共 RPC](https://docs.monad.xyz/developer-essentials/network-information) |
+| Plasma · 9745 | `plasma` | `https://rpc.plasma.to` | [Plasma 主网参数](https://www.plasma.org/docs/guides/network-configuration/mainnet-details) |
+| TON | `toncenter` | `https://toncenter.com` | [TON 官方 API 提供方](https://docs.ton.org/nodes/overview) · [TON Center v3](https://docs.ton.org/ecosystem/api/toncenter/v3/overview) |
 
-**启动时自动准入。** 在相应网络配置中将 `publicNodeProbeFile` 指向 JSON 文件，路径相对于配置文件。示例配置的默认路径为 `probes/<网络键>.json`。EVM 文件包含 `evmProbes`，Solana 文件包含 `solanaProbe`，Bitcoin、TRON、Aptos 和 Sui 文件包含 `nativeProbe`，格式与上述准入 API 相同。首次启动使用文件中已获授权的签名原文做真实准入；失败原因写入日志，可更新探针后通过 API 再次准入。重启复用 SQLite 中的记录及人工停用状态。
+TON 使用同一主机的 v2 发送消息、v3 按消息哈希查询，只占一家供应商。三条公开端点均有限流。Monad Foundation 将该端点列为开发用途，生产部署应使用适合生产流量的供应商。[Monad 使用说明](https://docs.monad.xyz/developer-essentials/network-information)
 
-生产管理员核对付费供应商对具体广播地址的说明后，可在 POST 或 PATCH 中设置 `mevProtected: true`。更换供应商、网络、URL 或凭证时需重新声明该标记。PublicNode 的标记由内置官方目录决定。
+**启用。** 向 `POST /rpc-providers` 提交默认目录中对应的 `providerId`、目标 `network` 和该链的签名准入探针，服务自动选择 URL。例如以太坊请求体形如 `{"providerId":"publicnode","network":"1","evmProbes":["0x…","0x…","0x…"]}`。首次通过全部检查后进入调度池；重复提交返回原记录。运行中的节点和启停状态可通过 `GET /rpc-providers` 查询。
+
+**启动时自动准入。** 在相应网络配置中将 `defaultProbeFile` 指向 JSON 文件（兼容旧配置键 `publicNodeProbeFile`），路径相对于配置文件。示例配置的默认路径为 `probes/<网络键>.json`。EVM 文件包含 `evmProbes`，Solana 文件包含 `solanaProbe`，Bitcoin、TRON、Aptos、Sui 和 TON 文件包含 `nativeProbe`，格式与上述准入 API 相同。首次启动使用文件中已获授权的签名原文做真实准入；失败原因写入日志，可更新探针后通过 API 再次准入。重启复用 SQLite 中的记录及人工停用状态。
+
+生产管理员核对付费供应商对具体广播地址的说明后，可在 POST 或 PATCH 中设置 `mevProtected: true`。更换供应商、网络、URL 或凭证时需重新声明该标记。内置端点的标记由目录决定。
 
 **选点。** 在启用、健康且允许试发的端点中，优先选择带保护标记的地址，再补齐最多三家独立供应商。每轮 PublicNode 只占一路，冷却时可由其他可用供应商补位。MEV 保护作用于经过该端点的一路提交；同一交易并发发送到普通 RPC 时，仍可能进入公开交易池。
 
@@ -274,11 +285,11 @@ GM 的代付地址是 fee payer，用户授权转账。上游先确定集群、�
 
 ### 提交与幂等
 
-| 方法与路径 | 输入 | 行为 |
-|---|---|---|
-| POST /solana/transactions | cluster、paymentId、signedTransaction（base64）、本次 getLatestBlockhash 返回的 context.slot 和 lastValidBlockHeight | 解析 message 中的 recentBlockhash，校验适用的交易格式、GM fee payer、用户及全部必需签名。缺签、签名无效或采用 durable nonce 时返回具体 4xx 原因；成功持久化返回 202、taskId 和 signature，直接进入待广播状态。 |
-| GET /solana/transactions/{signature}?cluster=… | 任一版本的第一份签名 | 返回同一支付任务、各版本签名和状态、blockhash、有效高度、逐供应商结果、入块 slot 和执行错误（如有）。 |
-| POST /solana/transactions/{signature}/resign | cluster、重新双签的完整原文和新 blockhash 的上下文及有效高度 | 仅当所指旧版本为任务当前版本且已进入 RESIGN_REQUIRED 时接收。核对同一付款、代付地址及指令与原版本一致，只更新 blockhash 和签名；在同一事务中登记新版本并调度。过时版本或旧交易结果待核实返回 409。 |
+| 功能 | 方法与路径 | 输入 | 行为 |
+|---|---|---|---|
+| 提交已由用户和代付方签名的交易 | POST /solana/transactions | cluster、paymentId、signedTransaction（base64）、本次 getLatestBlockhash 返回的 context.slot 和 lastValidBlockHeight | 解析 message 中的 recentBlockhash，校验适用的交易格式、GM fee payer、用户及全部必需签名。缺签、签名无效或采用 durable nonce 时返回具体 4xx 原因；成功持久化返回 202、taskId 和 signature，直接进入待广播状态。 |
+| 按签名查询支付进度与执行结果 | GET /solana/transactions/{signature}?cluster=… | 任一版本的第一份签名 | 返回同一支付任务、各版本签名和状态、blockhash、有效高度、逐供应商结果、入块 slot 和执行错误（如有）。 |
+| 为过期支付提交重新签名的交易 | POST /solana/transactions/{signature}/resign | cluster、重新双签的完整原文和新 blockhash 的上下文及有效高度 | 仅当所指旧版本为任务当前版本且已进入 RESIGN_REQUIRED 时接收。核对同一付款、代付地址及指令与原版本一致，只更新 blockhash 和签名；在同一事务中登记新版本并调度。过时版本或旧交易结果待核实返回 409。 |
 
 paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、集群和 paymentId 唯一创建任务，按集群和 signature 去重。重交已登记的相同签名返回 200 及原任务；同一付款经普通入口提交另一份交易返回 409。重新签名接口重试已登记版本也幂等。恢复时保留所有版本，以旧 signature 查询仍能看到最终结果。
 
@@ -340,11 +351,11 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 
 适用于 `bitcoin`、`tron`、`aptos`、`sui`、`ton`。请求须使用业务 Bearer Token。配置、准入和业务路径使用相同的网络键。
 
-| 方法与路径 | 行为 |
-|---|---|
-| `POST /networks/{network}/transactions` | JSON 必填 `rawTransaction`。Sui 还须提供 `signatures` 字符串数组。首次创建返回 202，包含 `taskId`、`network`、`txHash` 和 `state`。同一调用方重交该标识返回 200 及原任务。 |
-| `GET /networks/{network}/transactions/{txHash}` | 按提交时返回的标识查询。响应包含任务状态、每次供应商广播的结果、入块证据及执行状态。其他调用方查询该任务返回 404。 |
-| `POST /rpc-providers` | 管理员提供 `network`、`providerId`、`url` 和与上述 POST 请求体同格式的 `nativeProbe`。服务检查网络身份、读接口，并发送探针验证写权限。 |
+| 功能 | 方法与路径 | 行为 |
+|---|---|---|
+| 提交已签名交易并开始跟踪 | `POST /networks/{network}/transactions` | JSON 必填 `rawTransaction`。Sui 还须提供 `signatures` 字符串数组。首次创建返回 202，包含 `taskId`、`network`、`txHash` 和 `state`。同一调用方重交该标识返回 200 及原任务。 |
+| 按交易标识查询进度与执行结果 | `GET /networks/{network}/transactions/{txHash}` | 按提交时返回的标识查询。响应包含任务状态、每次供应商广播的结果、入块证据及执行状态。其他调用方查询该任务返回 404。 |
+| 验证并登记该链的供应商节点 | `POST /rpc-providers` | 管理员提供 `network`、`providerId`、`url` 和与上述 POST 请求体同格式的 `nativeProbe`。服务检查网络身份、读接口，并发送探针验证写权限。 |
 
 | 网络 | 供应商 URL 与广播接口 | 查询标识与证据 |
 |---|---|---|

@@ -13,7 +13,7 @@
 
 ## 提交一笔以太坊交易
 
-先按部署指南启动服务并为以太坊启用一个节点。下面的例子使用 `curl` 和 `jq`。将 `SIGNED_TX` 设为钱包已经签好、准备发往以太坊主网的十六进制交易原文，`BROADCASTER_API_TOKEN` 使用部署时设置的业务令牌。[部署服务](docs/api.zh-CN.md#运行) · [启用 PublicNode](docs/api.zh-CN.md#publicnode-默认节点)
+先按部署指南启动服务并为以太坊启用一个节点。下面的例子使用 `curl` 和 `jq`。将 `SIGNED_TX` 设为钱包已经签好、准备发往以太坊主网的十六进制交易原文，`BROADCASTER_API_TOKEN` 使用部署时设置的业务令牌。[部署服务](docs/api.zh-CN.md#运行) · [启用 PublicNode](docs/api.zh-CN.md#内置主网节点)
 
 ```sh
 BASE=http://127.0.0.1:8080
@@ -66,11 +66,15 @@ EVM 签名前可以查询推荐 nonce。比如链上返回 20，队列已占用 
 
 ## 生产环境怎么配节点
 
-公开配置只内置 PublicNode。每条链独立选点，有一家健康供应商就发一家，有三家就三家并发。
+18 条主网各内置一家供应商。通过准入后，每轮向最多三家健康供应商并发广播。部署时可私下登记额外的付费节点。
 
-| 想在生产环境使用三家独立供应商 | 需要配置什么 |
+| 主网 | 内置供应商与地址 |
 |---|---|
-| PublicNode 有预设的 15 条链 | 启用 PublicNode，再私下登记两家付费供应商。 |
-| Monad、Plasma、TON | 每条链自行登记三家供应商。 |
+| 其余 15 条主网 | PublicNode |
+| Monad | Monad Foundation · `https://rpc-mainnet.monadinfra.com` |
+| Plasma | Plasma 官方 RPC · `https://rpc.plasma.to` |
+| TON | TON Center · `https://toncenter.com`，v2 广播、v3 查询 |
 
-调度器优先使用标有 MEV-Protected 的端点。如果同一笔交易也发给普通 RPC，该副本仍可能进入公开交易池。[PublicNode 端点和保护标记](docs/api.zh-CN.md#publicnode-默认节点) · [18 条主网配置](config.mainnets.json)
+这三个公开端点均有限流。Monad Foundation 将其公开端点列为开发用途，生产部署请选用承载生产流量的供应商。[Monad 主网说明](https://docs.monad.xyz/developer-essentials/network-information)
+
+调度器优先使用标有 MEV-Protected 的端点。如果同一笔交易也发给普通 RPC，该副本仍可能进入公开交易池。[PublicNode 端点和保护标记](docs/api.zh-CN.md#内置主网节点) · [18 条主网配置](config.mainnets.json)

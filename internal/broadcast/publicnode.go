@@ -60,7 +60,22 @@ func (s *Service) publicRoute(network string) (publicRoute, bool) {
 	return publicRoute{}, false
 }
 
-func publicNodeID(network string) string { return publicNode + ":" + network }
+var officialDefaults = map[string]defaultProvider{
+	"143":  {publicRoute{"https://rpc-mainnet.monadinfra.com", false}, "monad-foundation", "143"},
+	"9745": {publicRoute{"https://rpc.plasma.to", false}, "plasma", "9745"},
+	"ton":  {publicRoute{"https://toncenter.com", false}, "toncenter", "ton"},
+}
+
+func (s *Service) preset(network string) (defaultProvider, bool) {
+	if route, ok := s.publicRoute(network); ok {
+		return defaultProvider{route, publicNode, network}, true
+	}
+	preset, ok := officialDefaults[network]
+	family := s.cfg.Networks[network].Family
+	return preset, ok && (network == "ton" && family == TON || network != "ton" && family == EVM)
+}
+
+func (p defaultProvider) id() string { return p.Provider + ":" + p.Network }
 
 type defaultProvider struct {
 	publicRoute
@@ -75,8 +90,8 @@ func (s *Service) defaultProviders(network string) []defaultProvider {
 		if network != "" && name != network {
 			continue
 		}
-		if route, ok := s.publicRoute(name); ok {
-			result = append(result, defaultProvider{route, publicNode, name})
+		if route, ok := s.preset(name); ok {
+			result = append(result, route)
 		}
 	}
 	return result
@@ -90,21 +105,22 @@ type admissionProbes struct {
 
 func (s *Service) admitConfiguredDefaults(ctx context.Context) {
 	for network, n := range s.cfg.Networks {
-		if n.PublicNodeProbeFile == "" || ctx.Err() != nil {
+		if n.DefaultProbeFile == "" || ctx.Err() != nil {
 			continue
 		}
-		if err := s.admitDefaultFile(ctx, network, n.PublicNodeProbeFile); err != nil && ctx.Err() == nil {
-			slog.Error("PublicNode default admission failed", "network", network, "error", err)
+		if err := s.admitDefaultFile(ctx, network, n.DefaultProbeFile); err != nil && ctx.Err() == nil {
+			slog.Error("default provider admission failed", "network", network, "error", err)
 		}
 	}
 }
 
 func (s *Service) admitDefaultFile(ctx context.Context, network, path string) error {
-	if _, ok := s.publicRoute(network); !ok {
-		return fmt.Errorf("no PublicNode default for network %s", network)
+	preset, ok := s.preset(network)
+	if !ok {
+		return fmt.Errorf("no default provider for network %s", network)
 	}
 	var exists bool
-	if err := s.Store.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM providers WHERE id=?)", publicNodeID(network)).Scan(&exists); err != nil || exists {
+	if err := s.Store.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM providers WHERE id=?)", preset.id()).Scan(&exists); err != nil || exists {
 		return err
 	}
 
@@ -130,34 +146,34 @@ func (s *Service) admitDefaultFile(ctx context.Context, network, path string) er
 	if decoder.Decode(new(any)) != io.EOF {
 		return errors.New("unexpected trailing probe data")
 	}
-	_, err = s.configure(ctx, "", ProviderInput{Network: network, Provider: publicNode, EVMProbes: probes.EVMProbes, SolanaProbe: probes.SolanaProbe, NativeProbe: probes.NativeProbe})
+	_, err = s.configure(ctx, "", ProviderInput{Network: network, Provider: preset.Provider, EVMProbes: probes.EVMProbes, SolanaProbe: probes.SolanaProbe, NativeProbe: probes.NativeProbe})
 	return err
 }
 
 func (s *Service) storedDefault(ctx context.Context, network string) (Endpoint, error) {
-	return s.endpoint(s.Store.db.QueryRowContext(ctx, "SELECT "+endpointCols+" FROM providers WHERE id=?", publicNodeID(network)))
+	preset, ok := s.preset(network)
+	if !ok {
+		return Endpoint{}, sql.ErrNoRows
+	}
+	return s.endpoint(s.Store.db.QueryRowContext(ctx, "SELECT "+endpointCols+" FROM providers WHERE id=?", preset.id()))
 }
 
-func (s *Service) newPublicNode(ctx context.Context, network string, input ProviderInput) (Endpoint, error) {
-	route, ok := s.publicRoute(network)
-	if !ok {
-		return Endpoint{}, invalid("no PublicNode default for this network")
-	}
+func (s *Service) newDefault(ctx context.Context, preset defaultProvider, input ProviderInput) (Endpoint, error) {
 	if input.MEVProtected != nil {
-		return Endpoint{}, invalid("PublicNode protection is set by the built-in catalog")
+		return Endpoint{}, invalid("default route protection is set by the built-in catalog")
 	}
 	if input.Bearer != nil {
 		return Endpoint{}, invalid("the public default accepts no bearer credential")
 	}
 	// Retry after a lost response must not rebroadcast probes or re-enable an
 	// endpoint that operations has since disabled.
-	existing, err := s.storedDefault(ctx, network)
+	existing, err := s.storedDefault(ctx, preset.Network)
 	if !errors.Is(err, sql.ErrNoRows) {
 		return existing, err
 	}
-	input.URL = &route.URL
-	input.Provider = publicNode
-	return s.saveProvider(ctx, "", publicNodeID(network), input)
+	input.URL = &preset.URL
+	input.Provider = preset.Provider
+	return s.saveProvider(ctx, "", preset.id(), input)
 }
 
 func isPublicNodeURL(u *url.URL) bool {
@@ -165,16 +181,30 @@ func isPublicNodeURL(u *url.URL) bool {
 	return host == "publicnode.com" || strings.HasSuffix(host, ".publicnode.com")
 }
 
+// Match operator-owned hosts even when an administrator registers an alias.
+func catalogOperator(u *url.URL) string {
+	if isPublicNodeURL(u) {
+		return publicNode
+	}
+	for _, p := range officialDefaults {
+		if strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), strings.TrimPrefix(p.URL, "https://")) {
+			return p.Provider
+		}
+	}
+	return ""
+}
+
 func (s *Service) identifyRoute(p *Endpoint) {
 	u, err := url.Parse(p.secret.URL)
 	if err != nil {
 		return
 	}
-	if !isPublicNodeURL(u) {
+	operator := catalogOperator(u)
+	if operator == "" {
 		p.MEVProtected = p.secret.MEVProtected
 		return
 	}
-	p.Provider = publicNode
+	p.Provider = operator
 	route, ok := s.publicRoute(p.Network)
 	p.MEVProtected = ok && route.MEVProtected && strings.TrimSuffix(p.secret.URL, "/") == route.URL
 }
