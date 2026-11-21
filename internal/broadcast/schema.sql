@@ -1,6 +1,6 @@
 CREATE UNIQUE INDEX IF NOT EXISTS tasks_active_nonce ON tasks(network,sender,length(nonce),nonce)
  WHERE family='evm' AND state<>'CLOSED';
-CREATE INDEX IF NOT EXISTS tasks_due ON tasks(due) WHERE state NOT IN ('CLOSED','RESIGN_REQUIRED');
+CREATE INDEX IF NOT EXISTS tasks_due ON tasks(due) WHERE state<>'CLOSED';
 CREATE TABLE IF NOT EXISTS versions (
  network text NOT NULL, hash text NOT NULL, task text NOT NULL REFERENCES tasks(id),
  raw text NOT NULL, state text NOT NULL, blockhash text NOT NULL, intent text NOT NULL,

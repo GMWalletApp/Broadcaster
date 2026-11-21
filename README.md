@@ -11,7 +11,7 @@
 
 Your wallet or payment service signs a transaction and submits it once. Broadcaster saves the signed bytes in SQLite, sends them through up to three independent RPC providers, and checks what landed. A node can time out after accepting a transaction. The worker keeps checking the original hash and resumes after a restart.
 
-For an EVM transfer, Broadcaster coordinates submitted nonces and watches every signed replacement. For a sponsored Solana payment, the user and fee payer sign the same message. If the blockhash expires, Broadcaster checks finalized history before asking for new signatures.
+For an EVM transfer, Broadcaster coordinates submitted nonces and watches every signed replacement. For a sponsored Solana payment, the user and fee payer sign the same message. When finalized history proves the blockhash expired without inclusion, Broadcaster reports the failed attempt to the submitting service. The application decides what happens next.
 
 ## Quick start
 
@@ -59,7 +59,9 @@ HTTP 202 means the task was saved. With a callback configured, the submitting se
 | `CONFIRMING` + `PENDING` | Inclusion observed. Keep the payment open while the worker checks execution. |
 | `INCLUDED` + `SUCCESS` | Execution succeeded. Apply any additional settlement confirmations your service requires. |
 | `INCLUDED` + `FAILED` | Execution failed. Read `reason` and `evidence` for the available cause. |
-| `REPLACED_EXTERNALLY` / `EXPIRED` | An external transaction consumed the nonce, or local tracking reached its deadline. Reconcile the payment before sending again. |
+| `EXPIRED` + `BLOCKHASH_EXPIRED` | The Solana transaction expired without inclusion. The submitting service receives a `transaction.closed` failure notification. |
+| `EXPIRED` + `TRACKING_DEADLINE` | Local tracking timed out. Reconcile the payment before sending again. |
+| `REPLACED_EXTERNALLY` | Another transaction consumed the nonce. Reconcile the consuming hash. |
 
 Verify the callback signature, persist the event and deduplicate by `eventId`. To reconcile a missed notification, query the original hash. [Webhook contract](docs/api.md#webhooks-and-recovery)
 

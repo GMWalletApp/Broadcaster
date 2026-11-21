@@ -348,8 +348,19 @@ func TestSolanaExpiryResignAndRecovery(t *testing.T) {
 	archived.Store(true)
 	drive(t, s)
 	q = must(s.Store.lookup(ctx, "merchant", Solana, "dev", sig))
-	if q.State != "RESIGN_REQUIRED" {
+	if q.State != "CLOSED" || q.Outcome != "EXPIRED" || q.Reason != "BLOCKHASH_EXPIRED" || q.Execution != "" || q.Versions[0].State != "EXPIRED" {
 		t.Fatal(q)
+	}
+	var closed Task
+	var payload []byte
+	if err := s.Store.db.QueryRow("SELECT payload FROM outbox WHERE task=? AND name='transaction.closed'", q.ID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, &closed); err != nil || closed.Outcome != q.Outcome || closed.Reason != q.Reason || closed.Execution != "" || closed.Active != sig || closed.Payment != in.Payment || !closed.Next.IsZero() {
+		t.Fatalf("unexpected expiry callback: %s", payload)
+	}
+	if _, _, err := s.claim(ctx); err != notFound {
+		t.Fatalf("expired payment was scheduled: %v", err)
 	}
 	raw := must(base64.StdEncoding.DecodeString(fresh.Signed))
 	raw[65] ^= 1
@@ -361,6 +372,10 @@ func TestSolanaExpiryResignAndRecovery(t *testing.T) {
 	st, r = request(s, "POST", "/solana/transactions/"+sig+"/resign", "test-token", fresh)
 	if st != 202 || r["taskId"] != q.ID {
 		t.Fatal(st, r)
+	}
+	retried := must(s.Store.lookup(ctx, "merchant", Solana, "dev", sig))
+	if retried.State != "READY" || retried.Outcome != "" || retried.Reason != "" || retried.Active == sig || retried.Revision <= closed.Revision {
+		t.Fatal(retried)
 	}
 	if st, _ := request(s, "POST", "/solana/transactions/"+sig+"/resign", "test-token", fresh); st != 200 {
 		t.Fatal(st)

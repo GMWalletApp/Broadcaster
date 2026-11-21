@@ -73,17 +73,17 @@ func (p solanaInclusion) finalized() bool { return p.Commitment == "finalized" |
 
 // Preserve the inclusion observation while a multi-round scan checks whether
 // a confirmed fork was displaced. Only a complete finalized exclusion proof
-// covering the previously observed slot can release the payment for signing.
+// covering the previously observed slot can establish expiry without inclusion.
 func reconcileSolanaConfirmation(t *Task, next update) update {
 	pending := update{state: t.State, reason: t.Reason, winner: t.Winner, execution: t.Execution, evidence: t.Evidence}
 	var prior solanaInclusion
 	if json.Unmarshal(t.Evidence, &prior) != nil || prior.finalized() || prior.Slot == 0 || t.Winner != t.Active {
 		return pending
 	}
-	if next.state == "RESIGN_REQUIRED" && next.rootSlot >= prior.Slot {
+	if next.blockhashExpired() && next.rootSlot >= prior.Slot {
 		return next
 	}
-	if next.state == "CHECKING_EXPIRY" || next.state == "RESIGN_REQUIRED" {
+	if next.state == "CHECKING_EXPIRY" || next.blockhashExpired() {
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(t.Evidence, &fields) != nil || fields == nil {
 			return pending
@@ -91,7 +91,7 @@ func reconcileSolanaConfirmation(t *Task, next update) update {
 		switch {
 		case next.advanced:
 			fields["historyCursor"] = next.evidence
-		case next.state == "RESIGN_REQUIRED" || next.reason == "CONFLICTING_HISTORY":
+		case next.blockhashExpired() || next.reason == "CONFLICTING_HISTORY":
 			delete(fields, "historyCursor")
 		}
 		pending.evidence = bodyJSON(fields)
@@ -176,7 +176,7 @@ func (s *Service) observeSolana(ctx context.Context, p Endpoint, t *Task) (updat
 	}
 	if !*valid.Value && (uint64(h) > active.LastValid || s.impossibleExpiry(ctx, p, *active)) {
 		u, err := s.solExpiry(ctx, p, t, *active)
-		if u.state == "RESIGN_REQUIRED" && processedSlot > u.rootSlot {
+		if u.blockhashExpired() && processedSlot > u.rootSlot {
 			return update{state: "CHECKING_EXPIRY", reason: "OBSERVED_PROCESSED", processedSlot: processedSlot}, nil
 		}
 		u.processedSlot = processedSlot

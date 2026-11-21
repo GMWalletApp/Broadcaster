@@ -87,7 +87,7 @@ func (s *Service) solExpiry(ctx context.Context, p Endpoint, t *Task, v Version)
 			}
 		}
 		if block.Hash == v.Blockhash || v.OriginSlot > 0 && cur.Slot <= v.OriginSlot {
-			return update{state: "RESIGN_REQUIRED", reason: "BLOCKHASH_EXPIRED", rootSlot: cur.Root, evidence: bodyJSON(map[string]any{"signature": v.Hash, "blockhash": v.Blockhash, "finalizedHeight": height, "historyFloorSlot": cur.Slot, "rootSlot": cur.Root, "verifiedOriginSlot": v.OriginSlot})}, nil
+			return update{state: "CLOSED", outcome: "EXPIRED", reason: "BLOCKHASH_EXPIRED", rootSlot: cur.Root, evidence: bodyJSON(map[string]any{"signature": v.Hash, "blockhash": v.Blockhash, "finalizedHeight": height, "historyFloorSlot": cur.Slot, "rootSlot": cur.Root, "verifiedOriginSlot": v.OriginSlot})}, nil
 		}
 		if cur.Slot == 0 || block.Parent >= cur.Slot || block.Prev == "" || v.OriginSlot == 0 && cur.Slot < v.ContextSlot && v.ContextSlot-cur.Slot > 1024 {
 			checking.reason = "BLOCKHASH_ORIGIN_UNVERIFIED"

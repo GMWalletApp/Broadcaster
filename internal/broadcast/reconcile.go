@@ -115,23 +115,28 @@ func sameNativeLocation(a, b json.RawMessage) bool {
 }
 
 func solanaDisagreement(selected, other update) bool {
-	switch selected.state {
-	case "CLOSED", "CONFIRMING":
-		if other.state == "RESIGN_REQUIRED" {
+	switch {
+	case selected.hasChainResult():
+		if other.blockhashExpired() {
 			return !selected.finalized
 		}
 		if !other.hasChainResult() || selected.finalized != other.finalized {
 			return false
 		}
 		return selected.winner != other.winner || selected.slot != other.slot || differentExecutions(selected, other)
-	case "RESIGN_REQUIRED":
+	case selected.blockhashExpired():
 		return other.processedSlot > selected.rootSlot || other.valid
 	default:
 		return false
 	}
 }
 
-func (u update) hasChainResult() bool { return u.state == "CLOSED" || u.winner != "" }
+// Only inclusion or an identified external consumer is a positive chain result.
+func (u update) hasChainResult() bool { return u.winner != "" || u.consuming != "" }
+
+func (u update) blockhashExpired() bool {
+	return u.outcome == "EXPIRED" && u.reason == "BLOCKHASH_EXPIRED"
+}
 
 func differentExecutions(a, b update) bool {
 	return a.execution != b.execution && a.execution != "PENDING" && b.execution != "PENDING"
@@ -156,7 +161,7 @@ func priority(u update) int {
 		return 10
 	case u.hasChainResult():
 		return 9
-	case u.state == "RESIGN_REQUIRED":
+	case u.blockhashExpired():
 		return 8
 	case u.state == "RESOLVING_NONCE" || u.state == "CHECKING_EXPIRY" && u.advanced:
 		return 7

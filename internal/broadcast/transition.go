@@ -9,7 +9,7 @@ import (
 
 // Commit the task, candidate states and outgoing events together. A superseded lease cannot publish a result.
 func (s *Service) finish(ctx context.Context, t Task, token string, u update) error {
-	oldReason, oldState, oldWinner := t.Reason, t.State, t.Winner
+	oldReason, oldWinner := t.Reason, t.Winner
 	t.State = u.state
 	t.Outcome = u.outcome
 	t.Reason = u.reason
@@ -37,7 +37,7 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 	}
 	t.Next = time.Now().Add(delay)
 	due := t.Next.UnixMilli()
-	if t.State == "CLOSED" || t.State == "RESIGN_REQUIRED" {
+	if t.State == "CLOSED" {
 		t.Next = time.Time{}
 		due = 0
 	}
@@ -66,7 +66,9 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 				v.State = "REPLACED"
 			case t.Outcome == "REPLACED_EXTERNALLY":
 				v.State = t.Outcome
-			case (t.State == "CHECKING_EXPIRY" || t.State == "RESIGN_REQUIRED") && v.Hash == t.Active:
+			case u.blockhashExpired() && v.Hash == t.Active:
+				v.State = "EXPIRED"
+			case t.State == "CHECKING_EXPIRY" && v.Hash == t.Active:
 				v.State = t.State
 			case t.State == "TRACKING" && t.Family == Solana && v.Hash == t.Active && u.processedSlot > 0:
 				v.State = "PENDING"
@@ -111,8 +113,6 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 		switch {
 		case t.State == "CLOSED":
 			return event(ctx, tx, t, "transaction.closed")
-		case t.State == "RESIGN_REQUIRED" && oldState != t.State:
-			return event(ctx, tx, t, "solana.resign_required")
 		case u.rejected && !u.bump && t.Reason != oldReason:
 			return event(ctx, tx, t, "transaction.broadcast_rejected")
 		case u.bump && oldReason != t.Reason:

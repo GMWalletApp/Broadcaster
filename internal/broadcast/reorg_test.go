@@ -175,13 +175,13 @@ func TestSolanaOrphanedBlockhashAndStaleProcessed(t *testing.T) {
 	expired.Store(true)
 	drive(t, s)
 	q = must(s.Store.lookup(t.Context(), "merchant", Solana, "dev", sig))
-	if q.State != "CHECKING_EXPIRY" || eventCount(t, s, "solana.resign_required") != 0 {
+	if q.State != "CHECKING_EXPIRY" || eventCount(t, s, "transaction.closed") != 0 {
 		t.Fatal(q)
 	}
 	expired.Store(false)
 	drive(t, s)
 	q = must(s.Store.lookup(t.Context(), "merchant", Solana, "dev", sig))
-	if q.State != "TRACKING" || q.Versions[0].State != "PENDING" || eventCount(t, s, "solana.resign_required") != 0 {
+	if q.State != "TRACKING" || q.Versions[0].State != "PENDING" || eventCount(t, s, "transaction.closed") != 0 {
 		t.Fatal(q)
 	}
 	expired.Store(true)
@@ -192,13 +192,13 @@ func TestSolanaOrphanedBlockhashAndStaleProcessed(t *testing.T) {
 	processed.Store(181) // Still ahead of our latest finalized root.
 	drive(t, s)
 	q = must(s.Store.lookup(t.Context(), "merchant", Solana, "dev", sig))
-	if q.State != "CHECKING_EXPIRY" || eventCount(t, s, "solana.resign_required") != 0 {
+	if q.State != "CHECKING_EXPIRY" || eventCount(t, s, "transaction.closed") != 0 {
 		t.Fatal(q)
 	}
 	processed.Store(112)
 	drive(t, s)
 	q = must(s.Store.lookup(t.Context(), "merchant", Solana, "dev", sig))
-	if q.State != "RESIGN_REQUIRED" || eventCount(t, s, "solana.resign_required") != 1 {
+	if q.State != "CLOSED" || q.Outcome != "EXPIRED" || q.Reason != "BLOCKHASH_EXPIRED" || eventCount(t, s, "transaction.closed") != 1 {
 		t.Fatal(q)
 	}
 }
@@ -312,7 +312,7 @@ func TestExpiryHintCannotAuthorizeOrBlockResignAlone(t *testing.T) {
 	task.State, task.Evidence = u.state, u.evidence
 	provideOrigin.Store(true)
 	u, err = s.observeSolana(t.Context(), p, &task)
-	if err != nil || u.state != "RESIGN_REQUIRED" {
+	if err != nil || !u.blockhashExpired() {
 		t.Fatal(u, err)
 	}
 }
@@ -387,7 +387,7 @@ func TestSolanaDivergentCommitments(t *testing.T) {
 	otherSlot := confirmed(101, "null")
 	finalized := first
 	finalized.finalized = true
-	proof := update{state: "RESIGN_REQUIRED", rootSlot: 100}
+	proof := update{state: "CLOSED", outcome: "EXPIRED", reason: "BLOCKHASH_EXPIRED", rootSlot: 100}
 	cases := []struct {
 		a, b     update
 		conflict bool

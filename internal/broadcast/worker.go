@@ -19,7 +19,7 @@ func (s *Service) claim(ctx context.Context) (Task, string, error) {
 	now := time.Now().UnixMilli()
 	err := s.Store.atomic(ctx, func(tx *sql.Tx) error {
 		var e error
-		t, e = scanTask(tx.QueryRowContext(ctx, "SELECT "+taskColumns+" FROM tasks WHERE state NOT IN ('CLOSED','RESIGN_REQUIRED') AND due<=? AND (lease_until IS NULL OR lease_until<=?) ORDER BY due,created LIMIT 1", now, now))
+		t, e = scanTask(tx.QueryRowContext(ctx, "SELECT "+taskColumns+" FROM tasks WHERE state<>'CLOSED' AND due<=? AND (lease_until IS NULL OR lease_until<=?) ORDER BY due,created LIMIT 1", now, now))
 		if e != nil {
 			return e
 		}
@@ -75,7 +75,7 @@ func (s *Service) process(ctx context.Context, t *Task, token string) error {
 	// Keep time for a durable transition even if archival reads time out.
 	observation, cancel := context.WithTimeout(ctx, 45*time.Second)
 	u := s.observe(observation, t, ps)
-	// Once inclusion has been observed, missing RPC data must not trigger another send or a request to sign again.
+	// After observing inclusion, require positive fork evidence before resuming sends or reporting expiry.
 	if t.State == "CONFIRMING" && !u.hasChainResult() {
 		if t.Family == EVM && (u.send || u.state == "QUEUED") && s.evmInclusionOrphaned(observation, ps, t.Evidence) {
 			u = update{state: "TRACKING", reason: "INCLUSION_REORGED"}

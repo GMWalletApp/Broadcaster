@@ -120,7 +120,7 @@ flowchart TD
 | Sui | `POST /networks/sui/transactions` | `GET /networks/sui/transactions/{txHash}` | 传 Base64 `rawTransaction`（TransactionData）和 Base64 `signatures` 数组，用 digest 查询。 |
 | TON | `POST /networks/ton/transactions` | `GET /networks/ton/transactions/{txHash}` | `rawTransaction` 为 Base64 编码的外部入站消息 BOC，用服务返回的规范化消息哈希查询。 |
 
-Solana 任务进入 `RESIGN_REQUIRED` 后，调用 `POST /solana/transactions/{signature}/resign`，提交使用新 blockhash 的完整双签交易。其他五条链各自的入块依据和 RPC 要求见下文。[Solana 代付与重签](#solana-代付交易) · [五条原生链的节点与入块依据](#原生链广播接口)
+Solana 交易经核实过期且未入块后，发送失败回调，后续处理由应用决定。其他五条链各自的入块依据和 RPC 要求见下文。[Solana 代付与重签](#solana-代付交易) · [五条原生链的节点与入块依据](#原生链广播接口)
 
 ### Solana 代付交易
 
@@ -132,24 +132,24 @@ GM 的代付地址是 fee payer，用户授权转账。上游先确定集群、�
 |---|---|---|---|
 | 提交已由用户和代付方签名的交易 | POST /solana/transactions | cluster、paymentId、signedTransaction（base64）、本次 getLatestBlockhash 返回的 context.slot 和 lastValidBlockHeight | 解析 message 中的 recentBlockhash，校验适用的交易格式、GM fee payer、用户及全部必需签名。缺签、签名无效或采用 durable nonce 时返回具体 4xx 原因；成功持久化返回 202、taskId 和 signature，直接进入待广播状态。 |
 | 按签名查询支付进度与执行结果 | GET /solana/transactions/{signature}?cluster=… | 任一版本的第一份签名 | 返回同一支付任务、各版本签名和状态、blockhash、有效高度、逐供应商结果、入块 slot 和执行错误（如有）。 |
-| 为过期支付提交重新签名的交易 | POST /solana/transactions/{signature}/resign | cluster、重新双签的完整原文和新 blockhash 的上下文及有效高度 | 仅当所指旧版本为任务当前版本且已进入 RESIGN_REQUIRED 时接收。核对同一付款、代付地址及指令与原版本一致，只更新 blockhash 和签名；在同一事务中登记新版本并调度。过时版本或旧交易结果待核实返回 409。 |
+| 为过期支付提交重新签名的交易 | POST /solana/transactions/{signature}/resign | cluster、重新双签的完整原文和新 blockhash 的上下文及有效高度 | 仅当应用主动重试、所指版本仍是当前版本且已因 BLOCKHASH_EXPIRED 关闭时接收。核对同一付款、代付地址及指令与原版本一致，只更新 blockhash 和签名；在同一事务中登记新版本并调度。过时版本或旧交易结果待核实返回 409。 |
 
 paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、集群和 paymentId 唯一创建任务，按集群和 signature 去重。重交已登记的相同签名返回 200 及原任务；同一付款经普通入口提交另一份交易返回 409。重新签名接口重试已登记版本也幂等。恢复时保留所有版本，以旧 signature 查询仍能看到最终结果。
 
-#### 广播、过期与重新签名
+#### 广播与过期处理
 
 | 当前状态 | 依据 | 下一步 |
 |---|---|---|
 | READY | 交易已全签并持久化，blockhash 仍有效 | 立即进入 BROADCASTING。对最多三家独立供应商并发调用 sendTransaction，发送相同的 base64 原文。两家或一家可用就立即发；零家可用时保持 READY 并继续监测有效期。 |
 | BROADCASTING | 一家返回与本地一致的 signature | 进入 TRACKING，收集其他在途响应。RPC 接收只证明已提交；按 signature 查链上结果。 |
-| BROADCASTING / TRACKING | 超时、断连、单节点报 BlockhashNotFound，或只观察到 processed | 继续按原 signature 核查。有效期内按需重播相同字节；拒绝原因按交易或端点归类。单个落后节点的响应不能触发重签。 |
+| BROADCASTING / TRACKING | 超时、断连、单节点报 BlockhashNotFound，或只观察到 processed | 继续按原 signature 核查。有效期内按需重播相同字节；拒绝原因按交易或端点归类。单个落后节点的响应不足以判定交易过期。 |
 | 任意未结束状态 | 核实原 signature 在该集群达到 confirmed 或 finalized | 保存 signature 和 slot。err 为 null 表示成功，有错误值则报告失败及原生 err。缺少该字段时进入 CONFIRMING 并查执行元数据。暂停重播，按已见证的 slot 核查。 |
 | READY / BROADCASTING / TRACKING | 同集群健康节点的 getBlockHeight 已**严格大于**该 blockhash 的 lastValidBlockHeight | 进入 CHECKING_EXPIRY，停止重播旧原文，核查旧签名是否已在有效期内入块。比较的是 block height；context.slot 只用于约束 RPC 数据新鲜度。 |
 | CHECKING_EXPIRY | 历史记录查到旧签名已入块 / 结果有分歧或历史覆盖不足 | 查到入块但缺少执行结果时进入 CONFIRMING，取得结果后按 INCLUDED 关闭；证据不足保持核查，可见 processed 时继续追踪其归属。单次查无记录或墙钟超时均不足以要求重新付款。 |
-| CHECKING_EXPIRY | 已核实旧 blockhash 失效，且有覆盖有效窗口的规范链历史证据表明旧签名未入块 | 置 RESIGN_REQUIRED，通过 outbox 向上游发送 solana.resign_required，附 taskId、paymentId、旧 signature 和过期依据。 |
-| RESIGN_REQUIRED | 上游获取新 recent blockhash，用户与 GM 对更新后的同一 message 全部重新签名，并调用 resign | 新版本从 READY 开始，产生新的 signature，复用原 taskId 和 paymentId。等签名期间不发起广播。 |
+| CHECKING_EXPIRY | 已核实旧 blockhash 失效，且有覆盖有效窗口的规范链历史证据表明旧签名未入块 | 以 `CLOSED / EXPIRED` 结束调度。向提交方发送 `transaction.closed`，原因 `BLOCKHASH_EXPIRED`，附签名和过期依据。交易未执行，省略 `executionStatus`。 |
+| CLOSED / EXPIRED | 仅当应用自行决定重试，并通过 resign 接口提交新签名 | 在原 taskId、paymentId 下创建新版本，从 READY 开始调度。 |
 
-签名方使用 getLatestBlockhash 一次取得 blockhash 及其 lastValidBlockHeight，建议使用 confirmed，广播预检采用一致的 commitment，并传 minContextSlot 避免落后节点误判。有效高度是签名原文之外的元数据；应核对消息中的 hash 与上游取得的配对记录。授权重签前，用健康节点核实同一旧 hash 在 finalized 视图中已失效、该视图已越过有效高度，再用 getSignatureStatuses（searchTransactionHistory=true）及具备历史覆盖的节点核查旧签名。无法确认旧交易结果时继续查询并对外报告原因。进程重启或通知重投都沿用已持久化的支付任务和签名版本。[获取 blockhash](https://solana.com/docs/rpc/http/getlatestblockhash) · [发送交易](https://solana.com/docs/rpc/http/sendtransaction) · [查询签名](https://solana.com/docs/rpc/http/getsignaturestatuses) · [交易确认与过期](https://solana.com/docs/advanced/confirmation)
+签名方使用 getLatestBlockhash 一次取得 blockhash 及其 lastValidBlockHeight，建议使用 confirmed，广播预检采用一致的 commitment，并传 minContextSlot 避免落后节点误判。有效高度是签名原文之外的元数据；应核对消息中的 hash 与上游取得的配对记录。报告过期前，用健康节点核实同一旧 hash 在 finalized 视图中已失效、该视图已越过有效高度，再用 getSignatureStatuses（searchTransactionHistory=true）及具备历史覆盖的节点核查旧签名。无法确认旧交易结果时继续查询并对外报告原因。进程重启或通知重投都沿用已持久化的支付任务和签名版本。[获取 blockhash](https://solana.com/docs/rpc/http/getlatestblockhash) · [发送交易](https://solana.com/docs/rpc/http/sendtransaction) · [查询签名](https://solana.com/docs/rpc/http/getsignaturestatuses) · [交易确认与过期](https://solana.com/docs/advanced/confirmation)
 
 #### 分叉与不完整的历史
 
@@ -158,10 +158,10 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 | 观测 | 处理 |
 |---|---|
 | 核查期间 confirmed 视图再次证明原 hash 有效 | 恢复跟踪，按原签名重播；若其他节点已有过期的历史证据，则先处理分歧。 |
-| 已见证的创建块后来成为孤块 | 最终链高度越过有效期、旧 hash 失效，且完整父链回溯覆盖创建 slot 后仍查无签名，可以要求重签。没有可靠的创建 slot 时，查到签名对应的原 blockhash 也能界定有效窗口。 |
+| 已见证的创建块后来成为孤块 | 最终链高度越过有效期、旧 hash 失效，且完整父链回溯覆盖创建 slot 后仍查无签名，可以报告过期失败。没有可靠的创建 slot 时，查到签名对应的原 blockhash 也能界定有效窗口。 |
 | 节点仍返回 processed | 已验证的最终链历史覆盖该 slot 时可排除已丢弃分叉上的观测。processed 高于核查起点时，继续等待新 finalized 视图。 |
-| 已见 confirmed 入块但缺少执行结果，此后签名从该分叉消失 | 保留已观察的 slot 和单独的历史扫描进度。只有 finalized 的完整排除证据覆盖该 slot 及原签名的整个有效窗口才允许重签。已核实 finalized 入块则继续等待执行结果。 |
-| 历史缺块、父 Hash 不符或创建位置无法验证 | 保持 CHECKING_EXPIRY，保留可用进度，继续尝试其他节点。调用方提供的 slot、高度和一次空查询都不能单独授权重签。 |
+| 已见 confirmed 入块但缺少执行结果，此后签名从该分叉消失 | 保留已观察的 slot 和单独的历史扫描进度。只有 finalized 的完整排除证据覆盖该 slot 及原签名的整个有效窗口才报告过期失败。已核实 finalized 入块则继续等待执行结果。 |
+| 历史缺块、父 Hash 不符或创建位置无法验证 | 保持 CHECKING_EXPIRY，保留可用进度，继续尝试其他节点。调用方提供的 slot、高度和一次空查询都不足以单独判定失败。 |
 | 节点在 confirmed 层给出冲突的入块位置或执行结果 | 暂停关闭，等待一致视图或更强的 finalized 证据。 |
 | 节点恢复后发现调用方在断网接单时给出的有效高度过大 | 用新鲜的 finalized blockhash 有效窗口识别矛盾，再以完整历史核查旧签名。 |
 
@@ -280,7 +280,6 @@ flowchart TD
 | `transaction.replacement_required` | 核对费用并决定是否签署同 Nonce 替换交易。 |
 | `transaction.included` | 显示已见入块，同时检查执行状态。 |
 | `transaction.nonce_conflict` | 核查占用该 Nonce 的外部交易。 |
-| `solana.resign_required` | 为原付款获取新 blockhash 并重新双签。 |
 | `transaction.closed` | 根据 `data.taskOutcome`、`data.executionStatus`、`data.reason` 更新订单。 |
 
 通知包含 `eventId`、`event`、任务版本 `version` 和快照 `data`。`Idempotency-Key` 与 `eventId` 相同。按事件 ID 去重，按任务版本防止旧快照覆盖新状态。同一次状态变更可能发出相同版本号的 included 和 closed，两种事件各自处理。回调失败只重试该事件。429 或 503 响应可通过 `Retry-After`（秒数或 HTTP 日期，上限 24 小时）延后重试。一家接收服务响应慢时，其他提交方继续接收自己的通知。恢复后可按原哈希补查。
@@ -390,7 +389,7 @@ go vet ./...
 | 同一 R 并发代付两笔，第一笔提交响应超时 | 两笔使用不同的 R 账户 Nonce；重试第一笔复用其原文和 Hash。若同属 A 且 D 采用顺序操作 Nonce，还需验证两份指令各有独立、顺序可执行的编号。 |
 | 代付地址 R 的 RPC latest 返回 20，本地队列已有尚未广播的 20 | 查询返回 chainNonce=20、nonce=21（假设 21 可用）。另一个 Hash 普通提交同一个 20 时返回 409；查询和冲突均不改变任何账户计数器。 |
 | Solana 同一 GM fee payer 同时代付两笔已全签交易，其中一笔三家发送均超时 | 两笔独立调度。超时的交易按本地第一份签名查链；有效期内重播相同字节。 |
-| Solana 旧 blockhash 已过期，历史查询随后查到原签名已入块 | 关闭原任务并返回执行结果，即使支付服务重试也不触发重签。 |
+| Solana 旧 blockhash 已过期，历史查询随后查到原签名已入块 | 关闭原任务并返回执行结果，重试原签名返回同一结果。 |
 | Solana 旧签名确认未入块且 blockhash 已失效，上游只提供新的 GM 签名 | 缺用户的新签名时拒绝；双方对新消息签齐后才登记新版本。重复提交同一新签名只产生一个版本。 |
 | 回调返回 429 或某提交服务一直响应缓慢 | 其他提交方继续收到通知。出错的事件按原 eventId 重试。 |
 

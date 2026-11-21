@@ -74,7 +74,7 @@ For example, the sponsor may sign two payments with outer nonces 100 and 101. If
 
 Native bodies use `rawTransaction`. Sui also requires `signatures`. The native submission response names the lookup field `txHash`; Solana returns `signature`.
 
-### Solana sponsorship and re-signing
+### Solana sponsorship and expiry
 
 ```json
 {"cluster":"solana","paymentId":"order-47","signedTransaction":"<Base64 signed bytes>","context":{"slot":123456},"lastValidBlockHeight":123600}
@@ -87,13 +87,13 @@ Use the actual slot and last valid block height from the signing-time `getLatest
 | Bytes accepted by RPC, submission timeout, or only `processed` | Keep observing the original signature. Resend identical bytes while valid. |
 | `confirmed` or `finalized` with an execution result | Record signature and slot. Explicit null `err` means success. A populated `err` carries the native execution failure. |
 | Signature in a block but metadata missing | Enter `CONFIRMING` and check transaction metadata. A finalized inclusion always waits for its execution result. |
-| Validity window passed | Enter `CHECKING_EXPIRY`. Verify finalized height and blockhash validity, then walk finalized parents and their signature lists. Persist the cursor across restarts. A missing index entry, a gap in the archive, or a timeout cannot authorize a second payment. |
-| Previously confirmed fork disappears | Retain the observed slot during the scan. Only a complete finalized proof covering that slot and the signing window permits re-signing. Conflicting providers or a newer processed observation delay it. |
-| Finalized history proves expiry and absence | Emit `solana.resign_required`. Both parties sign the same payment intent using a new blockhash. Submit it to `POST /solana/transactions/{signature}/resign`, pointing to the current expired signature, with the updated signing context. The new signature belongs to the original task. |
+| Validity window passed | Enter `CHECKING_EXPIRY`. Verify finalized height and blockhash validity, then walk finalized parents and their signature lists. Persist the cursor across restarts. If data is missing, the worker keeps checking. |
+| Previously confirmed fork disappears | Retain the observed slot during the scan. Only a complete finalized proof covering that slot and the signing window establishes expiry. Conflicting providers or a newer processed observation delay it. |
+| Finalized history proves expiry and absence | Stop scheduling and emit `transaction.closed` with `taskState=CLOSED`, `taskOutcome=EXPIRED` and `reason=BLOCKHASH_EXPIRED`. The transaction never executed, so the response omits `executionStatus`. The application decides how to handle the failure. |
 
 [Solana confirmation and expiration](https://solana.com/developers/cookbook/transactions/confirmation) · [Reported false timeouts and lagging RPC views](https://github.com/solana-labs/solana/issues/23949)
 
-The re-sign request uses the same fields as submission. Keep the same client, cluster, payment ID, fee payer and payment instructions. An old lookup signature still resolves to the task. Resubmitting an already registered version is idempotent, while a different version against a stale signature returns 409. A `processed` observation above the finalized scan root needs a newer root before it can be excluded.
+If the application independently chooses to retry this payment, it can submit a newly signed attempt to `POST /solana/transactions/{signature}/resign` after proven expiry. This explicit request starts a new revision under the same task. The request uses the same fields as submission. Keep the same client, cluster, payment ID, fee payer and payment instructions. An old lookup signature still resolves to the task. Resubmitting an already registered version is idempotent, while a different version against a stale signature returns 409. A `processed` observation above the finalized scan root needs a newer root before it can be excluded.
 
 ### Native inclusion evidence
 
@@ -121,7 +121,7 @@ A task groups one payment and its signed candidates. A delivery describes one ca
 | `TRACKING` | Broadcast or ongoing chain observation | Inspect every candidate. An interrupted send is ambiguous. A replacement changes the active candidate but an earlier candidate can still win. |
 | `RESOLVING_NONCE` | Confirmed EVM nonce advanced, or canonical views disagree | Pause this slot. Check candidates, authorizations and canonical block. Resume scheduling if the earlier observation was displaced. |
 | `CONFIRMING`, execution `PENDING` | Inclusion verified with missing execution data | Stop sending and poll. A proven EVM orphan can return to tracking. For a displaced Solana fork use finalized history as described above. |
-| `CHECKING_EXPIRY` / `RESIGN_REQUIRED` | Solana validity lost | Verify the full signing window; request new signatures only after exclusion. |
+| `CHECKING_EXPIRY` | Solana blockhash may have expired | Continue until inclusion is found or finalized history proves expiry without inclusion. In the latter case close as `EXPIRED / BLOCKHASH_EXPIRED`. |
 | `CLOSED / INCLUDED` | Inclusion and execution result verified | Record winner, evidence, success or failure, and enqueue completion. Other viable candidate hashes become replaced. |
 | `CLOSED / REPLACED_EXTERNALLY` | Identified external consumer of this nonce | Record consumer, notify the submitting service and wake queued transactions. |
 | `CLOSED / REJECTED` or `EXPIRED` | Locally provable invalid bytes, or pre-inclusion tracking deadline | Stop active work. An expired local task may still land; reconcile before paying again. |
@@ -173,7 +173,6 @@ The state change and its outbound event commit in one SQLite transaction. Task l
 | `transaction.replacement_required` | Review the signed fee cap and prepare a same-nonce replacement if appropriate. |
 | `transaction.included` | Show inclusion. Read `executionStatus`; it may still be pending. |
 | `transaction.nonce_conflict` | Reconcile the external consuming hash. |
-| `solana.resign_required` | Obtain fresh signatures for the existing payment. |
 | `transaction.closed` | Use `data.taskOutcome`, `data.executionStatus` and `data.reason` to settle or report failure. |
 
 Each request has `eventId`, `event`, `version` and a `data` task snapshot. Verify `X-Broadcaster-Signature` as the hex HMAC-SHA256 of the **raw request body**, using the configured secret and a constant-time comparison. `Idempotency-Key` equals `eventId`. Persist the event before returning 2xx. A lost response can produce the same event again.

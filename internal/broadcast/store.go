@@ -85,7 +85,7 @@ func scanTask(row scanner) (Task, error) {
 	err := row.Scan(&t.ID, &t.Owner, &t.Family, &t.Network, &t.Sender, &t.Nonce, &t.Payment, &t.State, &t.Active, &t.Outcome, &t.Winner, &t.Consuming, &t.Execution, &t.Reason, &evidence, &t.Revision, &t.Force, &created, &due)
 	t.Evidence = evidence
 	t.Created = time.UnixMilli(created).UTC()
-	if due > 0 && t.State != "CLOSED" && t.State != "RESIGN_REQUIRED" {
+	if due > 0 && t.State != "CLOSED" {
 		t.Next = time.UnixMilli(due).UTC()
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -298,30 +298,29 @@ func (s *Store) replace(ctx context.Context, owner, old string, input Task, v Ve
 				active = candidate
 			}
 		}
-		if t.Active != old || t.State == "CLOSED" || t.State == "RESOLVING_NONCE" || t.State == "CONFIRMING" {
+		// An application can explicitly start a new signed attempt after proven
+		// Solana expiry. Every other closed result is immutable.
+		expiredSolana := t.Family == Solana && t.State == "CLOSED" && t.Outcome == "EXPIRED" && t.Reason == "BLOCKHASH_EXPIRED"
+		if t.Active != old || (t.State == "CLOSED" && !expiredSolana) || t.State == "RESOLVING_NONCE" || t.State == "CONFIRMING" {
 			return conflict("VERSION_NOT_REPLACEABLE")
 		}
 		if input.Sender != t.Sender || input.Nonce != t.Nonce {
 			return conflict("SLOT_MISMATCH")
 		}
-		if t.Family == Solana && (t.State != "RESIGN_REQUIRED" || active.Intent != v.Intent || active.Blockhash == v.Blockhash) {
+		if t.Family == Solana && (!expiredSolana || active.Intent != v.Intent || active.Blockhash == v.Blockhash) {
 			return conflict("INVALID_RESIGN")
 		}
 		if e = insertVersion(ctx, tx, t, v); e != nil {
 			return e
 		}
-		if t.Family == Solana {
-			if _, e = tx.ExecContext(ctx, "UPDATE versions SET state='EXPIRED' WHERE task=? AND hash=?", t.ID, t.Active); e != nil {
-				return e
-			}
-		}
 		t.Active = v.Hash
 		t.State = input.State
+		t.Outcome, t.Execution, t.Winner, t.Consuming = "", "", "", ""
 		t.Revision++
 		t.Reason = ""
 		t.Evidence = nil
 		t.Next = time.Now()
-		_, e = tx.ExecContext(ctx, "UPDATE tasks SET active=?2,state=?3,revision=?4,reason='',evidence=NULL,due=0,forced=false,lease=NULL,lease_until=NULL WHERE id=?1", t.ID, t.Active, t.State, t.Revision)
+		_, e = tx.ExecContext(ctx, "UPDATE tasks SET active=?2,state=?3,revision=?4,reason='',outcome='',execution='',winner='',consuming='',evidence=NULL,due=0,forced=false,lease=NULL,lease_until=NULL WHERE id=?1", t.ID, t.Active, t.State, t.Revision)
 		if e != nil {
 			return e
 		}

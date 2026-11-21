@@ -89,11 +89,11 @@ func TestConfirmedSolanaForkCanResumeExpiryScanAfterRestart(t *testing.T) {
 	for range 10 {
 		drive(t, s)
 		view = must(s.Store.lookup(t.Context(), "merchant", Solana, "dev", sig))
-		if view.State == "RESIGN_REQUIRED" {
+		if view.State == "CLOSED" {
 			break
 		}
 	}
-	if view.State != "RESIGN_REQUIRED" || eventCount(t, s, "solana.resign_required") != 1 || eventCount(t, s, "transaction.closed") != 0 {
+	if view.State != "CLOSED" || view.Outcome != "EXPIRED" || view.Reason != "BLOCKHASH_EXPIRED" || eventCount(t, s, "solana.resign_required") != 0 || eventCount(t, s, "transaction.closed") != 1 {
 		t.Fatal(view)
 	}
 }
@@ -219,6 +219,44 @@ func TestScheduledFeeCapUsesObservedBaseFee(t *testing.T) {
 		got, err := service.observeEVM(t.Context(), Endpoint{secret: endpointSecret{URL: node.URL}}, &task)
 		if err != nil || got.bump != tc.wantBump || got.send == tc.wantBump {
 			t.Fatalf("base fee %q, force %t: update %+v, err %v", tc.baseFee, tc.force, got, err)
+		}
+	}
+}
+
+func TestLegacySolanaExpiryClosesOnceOnUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "expiry.db")
+	s := service(t, path)
+	ctx := t.Context()
+	_, err := s.Store.db.ExecContext(ctx, `
+		INSERT INTO tasks(id,owner_id,family,network,sender,payment,state,active,reason,evidence)
+		VALUES('task','merchant','solana','dev','payer','order','RESIGN_REQUIRED','sig','BLOCKHASH_EXPIRED','{"signature":"sig"}');
+		INSERT INTO versions(network,hash,task,raw,state,blockhash,intent,context_slot,last_valid,auth)
+		VALUES('dev','sig','task','raw','RESIGN_REQUIRED','blockhash','intent',100,150,'[]');
+		INSERT INTO outbox(id,owner_id,task,name,revision,payload)
+		VALUES('old','merchant','task','solana.resign_required',1,'{}');
+		PRAGMA user_version=1;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		reopened := service(t, path)
+		var payload []byte
+		err := reopened.Store.db.QueryRow("SELECT payload FROM outbox WHERE name='transaction.closed' AND sent IS NULL").Scan(&payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var snapshot Task
+		if err := json.Unmarshal(payload, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.State != "CLOSED" || snapshot.Outcome != "EXPIRED" || snapshot.Reason != "BLOCKHASH_EXPIRED" ||
+			snapshot.Revision != 2 || snapshot.Execution != "" || !snapshot.Next.IsZero() ||
+			len(snapshot.Versions) != 1 || snapshot.Versions[0].State != "EXPIRED" ||
+			eventCount(t, reopened, "solana.resign_required") != 0 || eventCount(t, reopened, "transaction.closed") != 1 {
+			t.Fatalf("unexpected migration result: %s", payload)
+		}
+		if _, _, err := reopened.claim(ctx); err != notFound {
+			t.Fatalf("expired task was schedulable: %v", err)
 		}
 	}
 }

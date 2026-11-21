@@ -11,7 +11,7 @@
 
 钱包或支付服务签好交易后提交一次。Broadcaster 将签名原文存入 SQLite，向最多三家独立 RPC 供应商并发广播，再核实哪一笔交易入块。即使节点接收后响应超时，后台仍按原哈希核查，重启后接着处理。
 
-EVM 转账按已提交任务的 Nonce 调度，替换后继续跟踪新旧哈希。Solana 代付由用户和代付方对同一消息签名；blockhash 过期时，Broadcaster 查完最终确定的区块历史，才通知上游重签。
+EVM 转账按已提交任务的 Nonce 调度，替换后继续跟踪新旧哈希。Solana 代付由用户和代付方对同一消息签名；当最终确定的区块历史证实 blockhash 已过期且交易未入块，Broadcaster 向提交方报告本次广播失败。后续处理由应用决定。
 
 ## 快速开始
 
@@ -59,7 +59,9 @@ HTTP 202 表示任务已保存。配置回调后，任务结束时原提交服�
 | `CONFIRMING` + `PENDING` | 已看到入块，正在核实执行结果，付款继续显示「确认中」。 |
 | `INCLUDED` + `SUCCESS` | 已核实执行成功。需要更多确认数的业务继续按自己的结算规则处理。 |
 | `INCLUDED` + `FAILED` | 已入块但执行失败，从 `reason` 和 `evidence` 读取原因。 |
-| `REPLACED_EXTERNALLY` / `EXPIRED` | 外部交易已占用 Nonce，或本地跟踪到期。再次付款前先核对原任务。 |
+| `EXPIRED` + `BLOCKHASH_EXPIRED` | Solana 交易过期且未入块，提交方收到 `transaction.closed` 失败通知。 |
+| `EXPIRED` + `TRACKING_DEADLINE` | 本地跟踪到期，再次付款前先核对原任务。 |
+| `REPLACED_EXTERNALLY` | 外部交易已占用 Nonce，根据占用该 Nonce 的交易哈希对账。 |
 
 接收方验证回调签名，持久化事件，并按 `eventId` 去重。需要补查时，用提交时返回的哈希查询。 [回调格式、重试与乱序](docs/api.zh-CN.md#故障恢复与上游事件)
 

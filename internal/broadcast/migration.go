@@ -35,7 +35,7 @@ func (s *Store) initialize(ctx context.Context) (err error) {
 	if err = tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > 2 {
 		return errors.New("unsupported database version")
 	}
 	if version == 0 {
@@ -49,10 +49,20 @@ func (s *Store) initialize(ctx context.Context) (err error) {
 			}
 		}
 	}
+	if version < 2 {
+		if _, err = tx.ExecContext(ctx, "DROP INDEX IF EXISTS tasks_due"); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, tasksDDL+schema); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "PRAGMA user_version=1"); err != nil {
+	if version < 2 {
+		if err = closeLegacySolanaExpiries(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, "PRAGMA user_version=2"); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -74,4 +84,34 @@ func migrateTaskSlots(ctx context.Context, tx *sql.Tx) error {
 		return errors.New("foreign key violation while migrating task slots")
 	}
 	return rows.Err()
+}
+
+// Older stores parked proven expiries pending a new signature. Preserve each
+// attempt's evidence and replace undelivered signing requests with completion.
+func closeLegacySolanaExpiries(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM outbox WHERE name='solana.resign_required' AND sent IS NULL"); err != nil {
+		return err
+	}
+	for {
+		t, err := scanTask(tx.QueryRowContext(ctx, `UPDATE tasks SET state='CLOSED', outcome='EXPIRED', reason='BLOCKHASH_EXPIRED',
+			revision=revision+1, due=0, lease=NULL, lease_until=NULL
+			WHERE id=(SELECT id FROM tasks WHERE family='solana' AND state='RESIGN_REQUIRED' LIMIT 1)
+			RETURNING `+taskColumns))
+		if errors.Is(err, notFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE versions SET state='EXPIRED' WHERE task=? AND hash=?", t.ID, t.Active); err != nil {
+			return err
+		}
+		t.Versions, err = versions(ctx, tx, t.ID)
+		if err != nil {
+			return err
+		}
+		if err = event(ctx, tx, t, "transaction.closed"); err != nil {
+			return err
+		}
+	}
 }
