@@ -97,13 +97,24 @@ Solana 按集群单独建池。准入时用 getGenesisHash 核对集群，验证
 | Base · 8453 | `https://base-rpc.publicnode.com` | MEV-Protected |
 | Arbitrum One · 42161 | `https://arbitrum-one-rpc.publicnode.com` | MEV-Protected |
 | Solana · mainnet-beta | `https://solana-rpc.publicnode.com` | MEV-Protected |
+| Arc · 5042 | `https://arc-rpc.publicnode.com` | MEV-Protected |
+| Robinhood Chain · 4663 | `https://robinhood-rpc.publicnode.com` | MEV-Protected |
+| HyperEVM · 999 | `https://hyperliquid-rpc.publicnode.com` | 普通 RPC |
+| Bitcoin | `https://bitcoin-rpc.publicnode.com` | Bitcoin Core RPC |
+| TRON | `https://tron-rpc.publicnode.com` | Wallet 和 WalletSolidity HTTP |
+| Aptos | `https://aptos-rest.publicnode.com/v1` | Fullnode REST |
+| Sui | `https://sui-grpc.publicnode.com:443` | 原生 gRPC v2（TLS） |
 | OP Mainnet · 10 | `https://optimism-rpc.publicnode.com` | 普通 RPC |
 | Polygon PoS · 137 | `https://polygon-bor-rpc.publicnode.com` | 普通 RPC |
 | Avalanche C-Chain · 43114 | `https://avalanche-c-chain-rpc.publicnode.com` | 普通 RPC |
 
+公开版本只提供 PublicNode 的节点地址。Monad、Plasma 和 TON 在 PublicNode 官方目录暂无主网端点。生产部署若需每链三路，已提供预设的链再登记两家独立供应商，其余三条各登记三家。付费地址和凭证通过私有管理接口登记，保存于部署环境的数据库。
+
 **启用。** 向 `POST /rpc-providers` 提交 `providerId: "publicnode"`、目标 `network` 和该链的签名准入探针即可，URL 自动选择。例如以太坊请求体形如 `{"providerId":"publicnode","network":"1","evmProbes":["0x…","0x…","0x…"]}`。首次通过全部检查后进入调度池；重复提交返回原记录。运行中的节点和启停状态可通过 `GET /rpc-providers` 查询。
 
-**启动时自动准入。** 在相应网络配置中将 `publicNodeProbeFile` 指向 JSON 文件，路径相对于配置文件。EVM 文件包含 `evmProbes`，Solana 文件包含 `solanaProbe`，格式与上述准入 API 相同。首次启动使用文件中已获授权的签名原文做真实准入；失败原因写入日志，可更新探针后通过 API 再次准入。重启复用 SQLite 中的记录及人工停用状态。
+**启动时自动准入。** 在相应网络配置中将 `publicNodeProbeFile` 指向 JSON 文件，路径相对于配置文件。示例配置的默认路径为 `probes/<网络键>.json`。EVM 文件包含 `evmProbes`，Solana 文件包含 `solanaProbe`，Bitcoin、TRON、Aptos 和 Sui 文件包含 `nativeProbe`，格式与上述准入 API 相同。首次启动使用文件中已获授权的签名原文做真实准入；失败原因写入日志，可更新探针后通过 API 再次准入。重启复用 SQLite 中的记录及人工停用状态。
+
+生产管理员核对付费供应商对具体广播地址的说明后，可在 POST 或 PATCH 中设置 `mevProtected: true`。更换供应商、网络、URL 或凭证时需重新声明该标记。PublicNode 的标记由内置官方目录决定。
 
 **选点。** 在启用、健康且允许试发的端点中，优先选择带保护标记的地址，再补齐最多三家独立供应商。每轮 PublicNode 只占一路，冷却时可由其他可用供应商补位。MEV 保护作用于经过该端点的一路提交；同一交易并发发送到普通 RPC 时，仍可能进入公开交易池。
 

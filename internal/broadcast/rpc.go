@@ -16,8 +16,9 @@ import (
 )
 
 type endpointSecret struct {
-	URL    string `json:"url"`
-	Bearer string `json:"bearer,omitempty"`
+	MEVProtected bool   `json:"mevProtected,omitempty"`
+	URL          string `json:"url"`
+	Bearer       string `json:"bearer,omitempty"`
 }
 type Endpoint struct {
 	ID            string     `json:"id"`

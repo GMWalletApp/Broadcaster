@@ -68,12 +68,13 @@ func (s *Service) endpoints(ctx context.Context, network string, readable bool) 
 }
 
 type ProviderInput struct {
-	Network  string  `json:"network"`
-	Chain    string  `json:"chainId"`
-	Provider string  `json:"providerId"`
-	URL      *string `json:"url"`
-	Bearer   *string `json:"bearer"`
-	Enabled  *bool   `json:"enabled"`
+	MEVProtected *bool   `json:"mevProtected"`
+	Network      string  `json:"network"`
+	Chain        string  `json:"chainId"`
+	Provider     string  `json:"providerId"`
+	URL          *string `json:"url"`
+	Bearer       *string `json:"bearer"`
+	Enabled      *bool   `json:"enabled"`
 	// Admin-supplied signed probes are real submissions. They are never logged.
 	NativeProbe *NativeRequest `json:"nativeProbe"`
 	EVMProbes   []string       `json:"evmProbes"`
@@ -264,6 +265,7 @@ func (s *Service) saveProvider(ctx context.Context, key, defaultID string, in Pr
 		}
 	}
 	recheck := newRow || in.URL != nil || in.Bearer != nil || in.Network != "" || in.Chain != "" || in.Provider != ""
+	previous := p
 	if in.Network != "" {
 		p.Network = in.Network
 	}
@@ -282,6 +284,16 @@ func (s *Service) saveProvider(ctx context.Context, key, defaultID string, in Pr
 	u, e := url.Parse(p.secret.URL)
 	if e != nil || u.Host == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return p, invalid("invalid RPC URL")
+	}
+	// A protection declaration applies only to this operator, chain and access route.
+	if previous.Network != p.Network || previous.Provider != p.Provider || previous.secret != p.secret {
+		p.secret.MEVProtected = false
+	}
+	if in.MEVProtected != nil {
+		if isPublicNodeURL(u) {
+			return p, invalid("PublicNode protection is set by the built-in catalog")
+		}
+		p.secret.MEVProtected = *in.MEVProtected
 	}
 	if p.Provider == "" || s.cfg.Networks[p.Network].Family == "" {
 		return p, invalid("unknown network or missing providerId")

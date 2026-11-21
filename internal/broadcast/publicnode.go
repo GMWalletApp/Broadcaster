@@ -30,6 +30,9 @@ var publicEVM = map[string]publicRoute{
 	"10":    {"https://optimism-rpc.publicnode.com", false},
 	"56":    {"https://bsc-rpc.publicnode.com", true},
 	"137":   {"https://polygon-bor-rpc.publicnode.com", false},
+	"999":   {"https://hyperliquid-rpc.publicnode.com", false},
+	"4663":  {"https://robinhood-rpc.publicnode.com", true},
+	"5042":  {"https://arc-rpc.publicnode.com", true},
 	"8453":  {"https://base-rpc.publicnode.com", true},
 	"42161": {"https://arbitrum-one-rpc.publicnode.com", true},
 	"43114": {"https://avalanche-c-chain-rpc.publicnode.com", false},
@@ -37,11 +40,24 @@ var publicEVM = map[string]publicRoute{
 
 func (s *Service) publicRoute(network string) (publicRoute, bool) {
 	n := s.cfg.Networks[network]
-	if n.Family == Solana && n.GenesisHash == solanaMainnetGenesis {
-		return publicRoute{"https://solana-rpc.publicnode.com", true}, true
+	switch n.Family {
+	case EVM:
+		r, ok := publicEVM[network]
+		return r, ok
+	case Solana:
+		if n.GenesisHash == solanaMainnetGenesis {
+			return publicRoute{"https://solana-rpc.publicnode.com", true}, true
+		}
+	case Bitcoin:
+		return publicRoute{"https://bitcoin-rpc.publicnode.com", false}, true
+	case Tron:
+		return publicRoute{"https://tron-rpc.publicnode.com", false}, true
+	case Sui:
+		return publicRoute{"https://sui-grpc.publicnode.com:443", false}, true
+	case Aptos:
+		return publicRoute{"https://aptos-rest.publicnode.com/v1", false}, true
 	}
-	r, ok := publicEVM[network]
-	return r, ok && n.Family == EVM
+	return publicRoute{}, false
 }
 
 func publicNodeID(network string) string { return publicNode + ":" + network }
@@ -67,6 +83,7 @@ func (s *Service) defaultProviders(network string) []defaultProvider {
 }
 
 type admissionProbes struct {
+	NativeProbe *NativeRequest `json:"nativeProbe"`
 	EVMProbes   []string       `json:"evmProbes"`
 	SolanaProbe *SolanaRequest `json:"solanaProbe"`
 }
@@ -113,7 +130,7 @@ func (s *Service) admitDefaultFile(ctx context.Context, network, path string) er
 	if decoder.Decode(new(any)) != io.EOF {
 		return errors.New("unexpected trailing probe data")
 	}
-	_, err = s.configure(ctx, "", ProviderInput{Network: network, Provider: publicNode, EVMProbes: probes.EVMProbes, SolanaProbe: probes.SolanaProbe})
+	_, err = s.configure(ctx, "", ProviderInput{Network: network, Provider: publicNode, EVMProbes: probes.EVMProbes, SolanaProbe: probes.SolanaProbe, NativeProbe: probes.NativeProbe})
 	return err
 }
 
@@ -125,6 +142,9 @@ func (s *Service) newPublicNode(ctx context.Context, network string, input Provi
 	route, ok := s.publicRoute(network)
 	if !ok {
 		return Endpoint{}, invalid("no PublicNode default for this network")
+	}
+	if input.MEVProtected != nil {
+		return Endpoint{}, invalid("PublicNode protection is set by the built-in catalog")
 	}
 	if input.Bearer != nil {
 		return Endpoint{}, invalid("the public default accepts no bearer credential")
@@ -140,15 +160,21 @@ func (s *Service) newPublicNode(ctx context.Context, network string, input Provi
 	return s.saveProvider(ctx, "", publicNodeID(network), input)
 }
 
+func isPublicNodeURL(u *url.URL) bool {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == "publicnode.com" || strings.HasSuffix(host, ".publicnode.com")
+}
+
 func (s *Service) identifyRoute(p *Endpoint) {
 	u, err := url.Parse(p.secret.URL)
 	if err != nil {
 		return
 	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	if host == "publicnode.com" || strings.HasSuffix(host, ".publicnode.com") {
-		p.Provider = publicNode
+	if !isPublicNodeURL(u) {
+		p.MEVProtected = p.secret.MEVProtected
+		return
 	}
+	p.Provider = publicNode
 	route, ok := s.publicRoute(p.Network)
 	p.MEVProtected = ok && route.MEVProtected && strings.TrimSuffix(p.secret.URL, "/") == route.URL
 }

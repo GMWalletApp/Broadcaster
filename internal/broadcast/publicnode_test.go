@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,5 +166,107 @@ func TestPreferredPublicNodeCountsOnceAndHonorsCooldown(t *testing.T) {
 		if j.Provider == publicNode {
 			t.Fatal(j)
 		}
+	}
+}
+
+func TestMainnetPublicNodeCatalog(t *testing.T) {
+	raw, err := os.ReadFile("../../config.mainnets.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err = json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	s := must(New(cfg, nil, make([]byte, 32)))
+	protected := map[string]bool{"1": true, "56": true, "8453": true, "42161": true, "4663": true, "5042": true, "solana": true}
+	absent := map[string]bool{"ton": true, "143": true, "9745": true}
+	if got := len(s.defaultProviders("")); got != 15 {
+		t.Fatal(got)
+	}
+	for name, n := range cfg.Networks {
+		r, ok := s.publicRoute(name)
+		if ok == absent[name] {
+			t.Fatal(name, r)
+		}
+		if !ok {
+			if n.PublicNodeProbeFile != "" {
+				t.Fatal(name, n.PublicNodeProbeFile)
+			}
+			continue
+		}
+		u, err := url.Parse(r.URL)
+		if err != nil || u.Scheme != "https" || !isPublicNodeURL(u) || r.MEVProtected != protected[name] || n.PublicNodeProbeFile != "probes/"+name+".json" {
+			t.Fatal(name, r, n.PublicNodeProbeFile)
+		}
+	}
+}
+
+func TestPublicNodeNativeProbeFile(t *testing.T) {
+	s := service(t, filepath.Join(t.TempDir(), "db"))
+	s.cfg.Networks["bitcoin"] = Network{Family: Bitcoin}
+	f := newNativeFixture(t, Bitcoin)
+	s.http.Transport = fixtureTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "https://bitcoin-rpc.publicnode.com" {
+			t.Fatal(r.URL)
+		}
+		w := httptest.NewRecorder()
+		f.serve(w, r)
+		return w.Result(), nil
+	})
+	path := filepath.Join(t.TempDir(), "bitcoin.json")
+	if err := os.WriteFile(path, bodyJSON(admissionProbes{NativeProbe: &f.in}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.admitDefaultFile(t.Context(), "bitcoin", path); err != nil {
+		t.Fatal(err)
+	}
+	p := must(s.storedDefault(t.Context(), "bitcoin"))
+	if p.Provider != publicNode || p.MEVProtected || !p.Enabled || f.writes.Load() != 1 {
+		t.Fatal(p)
+	}
+}
+
+func TestPrivateMEVPreference(t *testing.T) {
+	s := service(t, filepath.Join(t.TempDir(), "db"))
+	ctx := t.Context()
+	official := registerFixture(t, s, "1", "alias", "https://ethereum-rpc.publicnode.com")
+	ids := []string{}
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		ids = append(ids, registerFixture(t, s, "1", name, "https://"+name+".example"))
+	}
+	for _, id := range ids[:2] {
+		p, err := s.configure(ctx, id, ProviderInput{MEVProtected: new(true)})
+		if err != nil || !p.MEVProtected {
+			t.Fatal(p, err)
+		}
+	}
+	if _, err := s.configure(ctx, official, ProviderInput{MEVProtected: new(false)}); err == nil {
+		t.Fatal("PublicNode catalog override accepted")
+	}
+	task, v, err := decodeEVM(rawEVM(must(crypto.GenerateKey()), 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Owner = "merchant"
+	if _, _, err = s.Store.submit(ctx, task, v); err != nil {
+		t.Fatal(err)
+	}
+	task, token, err := s.claim(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := must(s.prepare(ctx, task, token))
+	if len(jobs) != 3 {
+		t.Fatal(len(jobs))
+	}
+	for _, job := range jobs {
+		if !job.MEVProtected || job.ID == ids[2] {
+			t.Fatal(job.ID)
+		}
+	}
+	p, err := s.configure(ctx, ids[0], ProviderInput{MEVProtected: new(false)})
+	if err != nil || p.MEVProtected {
+		t.Fatal(p, err)
 	}
 }

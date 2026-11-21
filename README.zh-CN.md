@@ -29,17 +29,17 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 ./broadcaster -config config.json -db broadcaster.db
 ```
 
-为要启用的链注册供应商。以下示例使用 Bitcoin Core JSON-RPC 2.0 网关，节点须已同步交易索引。将 `BTC_RPC_URL` 设为网关地址，`BTC_PROBE_HEX` 设为准备实际发送的已签名测试交易。准入会核对主网、读取权限和真实写权限。
+公开配置只内置 PublicNode。启动时从配置文件旁的 `probes/<网络键>.json` 读取运维签好的准入探针，也可启动后通过管理接口准入。下例适用于已配置 Bitcoin 的服务，`BTC_PROBE_HEX` 是准备实际发送的已签名探针。
 
 ```sh
 BASE=http://127.0.0.1:8080
-jq -n --arg url "$BTC_RPC_URL" --arg raw "$BTC_PROBE_HEX" \
-  '{network:"bitcoin",providerId:"provider-a",url:$url,nativeProbe:{rawTransaction:$raw}}' |
+jq -n --arg raw "$BTC_PROBE_HEX" \
+  '{network:"bitcoin",providerId:"publicnode",nativeProbe:{rawTransaction:$raw}}' |
   curl -fsS -X POST "$BASE/rpc-providers" -H "Authorization: Bearer $BROADCASTER_ADMIN_TOKEN" \
     -H 'Content-Type: application/json' --data-binary @-
 ```
 
-使用另外两家供应商各自的 ID 和端点重复注册，即可三路并发。部分网络提供 PublicNode 预设，也须通过准入才能使用。[18 链配置](config.mainnets.json) · [节点准入、熔断与恢复](docs/api.zh-CN.md#rpc-节点管理)
+PublicNode 为 18 条主网中的 15 条提供公开端点，其中 7 条标有 MEV-Protected。生产部署时，这 15 条各加两家独立供应商即可三路并发。Monad、Plasma、TON 需各自配置三家。调度优先选有保护的健康端点；通过普通 RPC 发出的副本仍可能进入公开交易池。 [18 链配置](config.mainnets.json) · [节点准入、熔断与恢复](docs/api.zh-CN.md#rpc-节点管理)
 
 ## 支持的网络
 

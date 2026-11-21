@@ -29,17 +29,17 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 ./broadcaster -config config.json -db broadcaster.db
 ```
 
-Register an RPC for each network you use. Admission checks network identity, read access and an actual signed broadcast. Prepare a funded probe that you intend to send. In this Bitcoin example, the HTTPS gateway must expose Bitcoin Core JSON-RPC 2.0 with a synchronized transaction index. `BTC_PROBE_HEX` contains a fully signed wire transaction.
+PublicNode is the only bundled provider. The sample configurations read operator-signed admission probes from `probes/<network>.json` beside the configuration file at startup. You can also admit a preset through the admin API. With Bitcoin configured, set `BTC_PROBE_HEX` to a funded, signed probe that you intend to broadcast.
 
 ```sh
 BASE=http://127.0.0.1:8080
-jq -n --arg url "$BTC_RPC_URL" --arg raw "$BTC_PROBE_HEX" \
-  '{network:"bitcoin",providerId:"provider-a",url:$url,nativeProbe:{rawTransaction:$raw}}' |
+jq -n --arg raw "$BTC_PROBE_HEX" \
+  '{network:"bitcoin",providerId:"publicnode",nativeProbe:{rawTransaction:$raw}}' |
   curl -fsS -X POST "$BASE/rpc-providers" -H "Authorization: Bearer $BROADCASTER_ADMIN_TOKEN" \
     -H 'Content-Type: application/json' --data-binary @-
 ```
 
-Repeat with a distinct provider ID and endpoint to add another operator. PublicNode presets cover a subset of the networks and also require admission. [18-network configuration](config.mainnets.json) · [Provider admission, defaults and recovery](docs/api.zh-CN.md#rpc-节点管理)
+PublicNode publishes routes for 15 of the 18 networks. Its catalog labels seven routes MEV-Protected. For three-way production broadcasting, privately register two additional operators on those 15 networks and three on Monad, Plasma and TON. The scheduler selects up to three independent healthy providers, preferring protected routes. An ordinary route can expose the payload to a public mempool. [18-network configuration](config.mainnets.json) · [Provider admission, defaults and recovery](docs/api.zh-CN.md#rpc-节点管理)
 
 ## Networks
 

@@ -5,62 +5,76 @@
   "networks": {
     "1": {
       "family": "evm",
-      "publicNodeProbeFile": "",
+      "publicNodeProbeFile": "probes/1.json",
       "entryPoints": [
         "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
       ]
     },
     "42161": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/42161.json"
     },
     "56": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/56.json"
     },
     "43114": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/43114.json"
     },
     "137": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/137.json"
     },
     "10": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/10.json"
     },
     "8453": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/8453.json"
     },
     "999": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/999.json"
     },
     "143": {
       "family": "evm"
     },
     "5042": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/5042.json"
     },
     "9745": {
       "family": "evm"
     },
     "4663": {
-      "family": "evm"
+      "family": "evm",
+      "publicNodeProbeFile": "probes/4663.json"
     },
     "solana": {
       "family": "solana",
+      "publicNodeProbeFile": "probes/solana.json",
       "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
       "feePayers": [
         "${SOLANA_FEE_PAYER}"
       ]
     },
     "bitcoin": {
-      "family": "bitcoin"
+      "family": "bitcoin",
+      "publicNodeProbeFile": "probes/bitcoin.json"
     },
     "tron": {
-      "family": "tron"
+      "family": "tron",
+      "publicNodeProbeFile": "probes/tron.json"
     },
     "sui": {
-      "family": "sui"
+      "family": "sui",
+      "publicNodeProbeFile": "probes/sui.json"
     },
     "aptos": {
-      "family": "aptos"
+      "family": "aptos",
+      "publicNodeProbeFile": "probes/aptos.json"
     },
     "ton": {
       "family": "ton"
