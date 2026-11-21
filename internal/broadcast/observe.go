@@ -16,13 +16,17 @@ import (
 type update struct {
 	state, reason, outcome, winner, consuming, execution string
 	evidence                                             json.RawMessage
-	send, bump                                           bool
+	send, bump, rejected                                 bool
 	finalized, valid, advanced                           bool
 	slot, processedSlot, rootSlot                        uint64
 }
 
 func included(hash, execution string, proof any) update {
-	return update{state: "CLOSED", outcome: "INCLUDED", winner: hash, execution: execution, evidence: bodyJSON(proof)}
+	u := update{state: "CLOSED", outcome: "INCLUDED", winner: hash, execution: execution, evidence: bodyJSON(proof)}
+	if execution == "PENDING" {
+		u.state, u.outcome, u.reason = "CONFIRMING", "", "AWAITING_EXECUTION_RESULT"
+	}
+	return u
 }
 
 type evmTxRef struct {
@@ -122,14 +126,39 @@ func (s *Service) evmLocation(ctx context.Context, p Endpoint, v *Version) (upda
 	if json.Unmarshal(b.Transactions[idx], &hash) != nil || hash != v.Hash {
 		return update{}, false, errors.New("canonical block mismatch")
 	}
-	execution := "UNKNOWN"
+	execution := "PENDING"
 	switch status.Status {
 	case "0x1":
 		execution = "SUCCESS"
 	case "0x0":
 		execution = "FAILED"
 	}
-	return included(v.Hash, execution, map[string]any{"completionBasis": "BLOCK_INCLUSION", "blockHash": b.Hash, "blockNumber": b.Height, "transactionIndex": ref.Index, "receipt": receipt}), true, nil
+	proof := map[string]any{"completionBasis": "BLOCK_INCLUSION", "blockHash": b.Hash, "blockNumber": b.Height, "transactionIndex": ref.Index, "receipt": receipt}
+	reason := ""
+	if execution == "FAILED" {
+		reason = "EXECUTION_CAUSE_UNAVAILABLE"
+		var frame struct{ Error, RevertReason string }
+		params := []any{v.Hash, map[string]any{"tracer": "callTracer", "tracerConfig": map[string]bool{"onlyTopCall": true}}}
+		if s.call(ctx, p, "debug_traceTransaction", params, &frame) == nil && frame.Error != "" {
+			proof["vmError"] = limitedDetail(frame.Error)
+			switch strings.ToLower(frame.Error) {
+			case "out of gas":
+				reason = "EVM_OUT_OF_GAS"
+			case "execution reverted":
+				reason = "EVM_REVERTED"
+			default:
+				reason = "EVM_VM_ERROR"
+			}
+			if frame.RevertReason != "" {
+				proof["revertReason"] = limitedDetail(frame.RevertReason)
+			}
+		}
+	}
+	u := included(v.Hash, execution, proof)
+	if reason != "" {
+		u.reason = reason
+	}
+	return u, true, nil
 }
 
 type accountState struct {
@@ -335,7 +364,7 @@ func (s *Service) observeEVM(ctx context.Context, p Endpoint, t *Task) (update, 
 		}
 		for i := range t.Versions {
 			if t.Versions[i].Hash == h {
-				return included(h, "UNKNOWN", map[string]any{"blockHash": b.Hash, "blockNumber": b.Height, "completionBasis": "BLOCK_INCLUSION", "transactionIndex": hexutil.EncodeUint64(b.ConsumerIndex)}), nil
+				return included(h, "PENDING", map[string]any{"blockHash": b.Hash, "blockNumber": b.Height, "completionBasis": "BLOCK_INCLUSION", "transactionIndex": hexutil.EncodeUint64(b.ConsumerIndex)}), nil
 			}
 		}
 		return update{state: "CLOSED", outcome: "REPLACED_EXTERNALLY", reason: "NONCE_CONSUMED_EXTERNALLY", consuming: h, evidence: bodyJSON(map[string]string{"blockHash": b.Hash, "blockNumber": b.Height, "transactionIndex": hexutil.EncodeUint64(b.ConsumerIndex)})}, nil

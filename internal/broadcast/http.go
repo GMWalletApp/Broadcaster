@@ -43,12 +43,15 @@ func (s *Service) Handler() http.Handler {
 	}
 	bind("POST /networks/{network}/transactions", false, s.nativeTransactions)
 	bind("GET /networks/{network}/transactions/{hash}", false, s.nativeTransactions)
-	bind("POST /transactions", false, s.evmSubmit)
-	bind("POST /transactions/{hash}/replacement", false, s.evmSubmit)
-	bind("GET /transactions/{hash}", false, s.getTask(EVM))
-	bind("POST /transactions/{hash}/force", false, s.force)
-	bind("GET /accounts/{address}/queue", false, s.queue)
-	bind("GET /accounts/{address}/nonce", false, s.nonce)
+	// Older clients use the same handlers without a namespace.
+	for _, prefix := range []string{"/EVM", ""} {
+		bind("POST "+prefix+"/transactions", false, s.evmSubmit)
+		bind("POST "+prefix+"/transactions/{hash}/replacement", false, s.evmSubmit)
+		bind("GET "+prefix+"/transactions/{hash}", false, s.getTask(EVM))
+		bind("POST "+prefix+"/transactions/{hash}/force", false, s.force)
+		bind("GET "+prefix+"/accounts/{address}/queue", false, s.queue)
+		bind("GET "+prefix+"/accounts/{address}/nonce", false, s.nonce)
+	}
 	bind("POST /solana/transactions", false, s.solSubmit)
 	bind("POST /solana/transactions/{signature}/resign", false, s.solSubmit)
 	bind("GET /solana/transactions/{signature}", false, s.getTask(Solana))
@@ -256,7 +259,7 @@ func (s *Service) force(w http.ResponseWriter, r *http.Request, c Client) error 
 		if err != nil {
 			return err
 		}
-		if t.Active != hash || t.State == "CLOSED" || t.State == "RESOLVING_NONCE" {
+		if t.Active != hash || t.State == "CLOSED" || t.State == "RESOLVING_NONCE" || t.State == "CONFIRMING" {
 			return conflict("NOT_SCHEDULABLE")
 		}
 		_, err = tx.ExecContext(r.Context(), "INSERT INTO force_audit(task,actor,reason) VALUES(?,?,?)", t.ID, c.Name, in.Reason)

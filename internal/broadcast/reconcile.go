@@ -64,7 +64,7 @@ func (s *Service) observe(ctx context.Context, task *Task, endpoints []Endpoint)
 	}
 
 	next := selected.next
-	if task.Family == EVM && next.state == "CLOSED" {
+	if task.Family == EVM && next.hasChainResult() {
 		var block struct {
 			Height string `json:"blockNumber"`
 			Hash   string `json:"blockHash"`
@@ -73,14 +73,14 @@ func (s *Service) observe(ctx context.Context, task *Task, endpoints []Endpoint)
 			return update{state: "RESOLVING_NONCE", reason: "CHAIN_VIEW_CONFLICT"}
 		}
 		for _, v := range views {
-			if v.err == nil && v.next.state == "CLOSED" && (v.next.winner != next.winner || v.next.consuming != next.consuming || differentExecutions(next, v.next)) {
+			if v.err == nil && v.next.hasChainResult() && (v.next.winner != next.winner || v.next.consuming != next.consuming || differentExecutions(next, v.next)) {
 				return update{state: "RESOLVING_NONCE", reason: "CHAIN_VIEW_CONFLICT"}
 			}
 		}
 	}
-	if IsNative(task.Family) && next.state == "CLOSED" {
+	if IsNative(task.Family) && next.hasChainResult() {
 		for _, v := range views {
-			if v.err == nil && v.next.state == "CLOSED" && (differentExecutions(next, v.next) || string(v.next.evidence) != string(next.evidence)) {
+			if v.err == nil && v.next.hasChainResult() && (differentExecutions(next, v.next) || !sameNativeLocation(v.next.evidence, next.evidence)) {
 				return update{state: "TRACKING", reason: "CHAIN_VIEW_CONFLICT"}
 			}
 		}
@@ -101,13 +101,26 @@ func (s *Service) observe(ctx context.Context, task *Task, endpoints []Endpoint)
 	return next
 }
 
+// Native reads may carry optional VM diagnostics. Compare only the location proof.
+func sameNativeLocation(a, b json.RawMessage) bool {
+	var left, right map[string]json.RawMessage
+	if json.Unmarshal(a, &left) != nil || json.Unmarshal(b, &right) != nil {
+		return false
+	}
+	for _, field := range []string{"executionDetail", "receiptResult"} {
+		delete(left, field)
+		delete(right, field)
+	}
+	return string(bodyJSON(left)) == string(bodyJSON(right))
+}
+
 func solanaDisagreement(selected, other update) bool {
 	switch selected.state {
-	case "CLOSED":
+	case "CLOSED", "CONFIRMING":
 		if other.state == "RESIGN_REQUIRED" {
 			return !selected.finalized
 		}
-		if other.state != "CLOSED" || selected.finalized != other.finalized {
+		if !other.hasChainResult() || selected.finalized != other.finalized {
 			return false
 		}
 		return selected.winner != other.winner || selected.slot != other.slot || differentExecutions(selected, other)
@@ -118,8 +131,10 @@ func solanaDisagreement(selected, other update) bool {
 	}
 }
 
+func (u update) hasChainResult() bool { return u.state == "CLOSED" || u.winner != "" }
+
 func differentExecutions(a, b update) bool {
-	return a.execution != b.execution && a.execution != "UNKNOWN" && b.execution != "UNKNOWN"
+	return a.execution != b.execution && a.execution != "PENDING" && b.execution != "PENDING"
 }
 
 func preferView(candidate, current update) bool {
@@ -127,16 +142,19 @@ func preferView(candidate, current update) bool {
 	if a != b {
 		return a > b
 	}
-	return current.execution == "UNKNOWN" && (candidate.execution == "SUCCESS" || candidate.execution == "FAILED")
+	if current.execution == "PENDING" && (candidate.execution == "SUCCESS" || candidate.execution == "FAILED") {
+		return true
+	}
+	return current.reason == "EXECUTION_CAUSE_UNAVAILABLE" && candidate.execution == "FAILED" && candidate.reason != "" && candidate.reason != current.reason
 }
 
 // A positive result wins over an empty index. Nonce consumption and expiry
 // checks take precedence over a request to send the same bytes again.
 func priority(u update) int {
 	switch {
-	case u.state == "CLOSED" && u.finalized:
+	case u.hasChainResult() && u.finalized:
 		return 10
-	case u.state == "CLOSED":
+	case u.hasChainResult():
 		return 9
 	case u.state == "RESIGN_REQUIRED":
 		return 8
@@ -151,6 +169,25 @@ func priority(u update) int {
 	default:
 		return 1
 	}
+}
+
+// All readable peers must agree on a new block at the original height
+// before a previously included transaction can be scheduled again.
+func (s *Service) evmInclusionOrphaned(ctx context.Context, ps []Endpoint, evidence json.RawMessage) bool {
+	var old struct {
+		Height string `json:"blockNumber"`
+		Hash   string `json:"blockHash"`
+	}
+	if json.Unmarshal(evidence, &old) != nil || !isHash(old.Hash) {
+		return false
+	}
+	for _, p := range ps {
+		block, err := s.block(ctx, p, old.Height, false)
+		if err == nil {
+			return block.Hash != old.Hash && s.agreeOnBlock(ctx, ps, p.ID, old.Height, block.Hash)
+		}
+	}
+	return false
 }
 
 // The witness must still see the same canonical block after any slow trace or

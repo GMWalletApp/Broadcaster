@@ -18,7 +18,7 @@ Start the service and enable an Ethereum provider first. The example uses `curl`
 ```sh
 BASE=http://127.0.0.1:8080
 TX_HASH=$(jq -n --arg raw "$SIGNED_TX" '{rawTransaction: $raw}' |
-  curl -fsS "$BASE/transactions?chainId=1" \
+  curl -fsS "$BASE/EVM/transactions?chainId=1" \
     -H "Authorization: Bearer $BROADCASTER_API_TOKEN" \
     -H 'Content-Type: application/json' --data-binary @- |
   jq -er '.txHash')
@@ -37,10 +37,17 @@ HTTP 202 acknowledges that Broadcaster has accepted and saved the task. Tracking
 }
 ```
 
-The submitting service reads `INCLUDED` as evidence that the transaction landed, then checks `executionStatus`. A landed transaction can still report `FAILED`, or `UNKNOWN` while its execution result is unavailable. Deduplicate callbacks by `eventId`. To inspect progress or reconcile a result, look up the hash returned at submission.
+| Result | Meaning |
+|---|---|
+| `CONFIRMING`, `executionStatus=PENDING` | Inclusion observed. Broadcaster polls for the execution result. Show the payment as confirming. |
+| `CLOSED / INCLUDED`, `executionStatus=SUCCESS` | Inclusion and successful execution verified. |
+| `CLOSED / INCLUDED`, `executionStatus=FAILED` | Read `reason` for the cause (for example, out of gas or a contract revert) and `evidence` for available diagnostics. |
+| HTTP `409 NONCE_CONFLICT` at intake, or a `REJECTED` delivery | The nonce is already in the local queue, or an individual node refused the transaction. Each refused delivery has its own `reason`, including fee and TRON signature permission errors. |
+
+Deduplicate callbacks by `eventId`. Use the returned transaction hash to inspect progress or reconcile a result. [Failure reasons (中文)](docs/api.zh-CN.md#如何判断失败原因)
 
 ```sh
-curl -fsS "$BASE/transactions/$TX_HASH?chainId=1" \
+curl -fsS "$BASE/EVM/transactions/$TX_HASH?chainId=1" \
   -H "Authorization: Bearer $BROADCASTER_API_TOKEN" |
   jq '{taskState, taskOutcome, executionStatus}'
 ```
@@ -64,11 +71,11 @@ To enable the bundled Ethereum endpoint, put the signed admission probes in `pro
 
 ## Supported networks
 
-| Mainnets | Submit to |
-|---|---|
-| Ethereum, Arbitrum One, BNB Smart Chain, Avalanche C-Chain, Polygon PoS, OP Mainnet, Base, HyperEVM, Monad, Arc, Plasma, Robinhood Chain | `POST /transactions` |
-| Solana | `POST /solana/transactions` |
-| Bitcoin, TRON, Aptos, Sui, TON | `POST /networks/{network}/transactions` |
+| Mainnets | Submit to | API reference |
+|---|---|---|
+| Ethereum, Arbitrum One, BNB Smart Chain, Avalanche C-Chain, Polygon PoS, OP Mainnet, Base, HyperEVM, Monad, Arc, Plasma, Robinhood Chain | `POST /EVM/transactions` | [EVM](docs/api.zh-CN.md#evm-调用方接口) |
+| Solana | `POST /solana/transactions` | [Solana](docs/api.zh-CN.md#solana-代付交易) |
+| Bitcoin, TRON, Aptos, Sui, TON | `POST /networks/{network}/transactions` | [Bitcoin · TRON · Aptos · Sui · TON](docs/api.zh-CN.md#非-evm-调用方接口) |
 
 On EVM, a signer can ask for the next available nonce. If the chain returns 20 and the queue holds 20, 21 and 23, Broadcaster suggests 22. On Solana, the user and fee payer sign the same message. If the blockhash expires, Broadcaster checks the original transaction’s history before requesting new signatures. [EVM nonce guide (中文)](docs/api.zh-CN.md#evm-nonce-查询与任务排序) · [Solana sponsorship (中文)](docs/api.zh-CN.md#solana-代付交易) · [Native transaction formats (中文)](docs/api.zh-CN.md#原生链广播接口)
 

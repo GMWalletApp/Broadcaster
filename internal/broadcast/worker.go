@@ -204,8 +204,9 @@ func (s *Service) broadcast(ctx context.Context, t *Task, token string, u update
 		return u, errors.New("missing active transaction version")
 	}
 	type completed struct {
-		result sendResult
-		err    error
+		provider string
+		result   sendResult
+		err      error
 	}
 	ch := make(chan completed, len(jobs))
 	for _, j := range jobs {
@@ -213,10 +214,12 @@ func (s *Service) broadcast(ctx context.Context, t *Task, token string, u update
 			start := time.Now()
 			r := s.send(ctx, j.Endpoint, t.Family, *active)
 			err := s.record(ctx, j, r, time.Since(start))
-			ch <- completed{r, err}
+			ch <- completed{j.Provider, r, err}
 		}()
 	}
 	accepted, unknown := false, false
+	rejected := ""
+	refusals := make(map[string]string)
 	for range jobs {
 		c := <-ch
 		if c.err != nil {
@@ -227,6 +230,14 @@ func (s *Service) broadcast(ctx context.Context, t *Task, token string, u update
 			accepted = true
 		case "UNKNOWN":
 			unknown = true
+		case "REJECTED":
+			reason := rejectionReason(t.Family, c.result.detail)
+			refusals[c.provider] = reason
+			if rejected == "" {
+				rejected = reason
+			} else if rejected != reason {
+				rejected = "RPC_REJECTED"
+			}
 		}
 		msg := strings.ToLower(c.result.detail)
 		if strings.Contains(msg, "underpriced") || strings.Contains(msg, "base fee") {
@@ -246,7 +257,9 @@ func (s *Service) broadcast(ctx context.Context, t *Task, token string, u update
 		active.State = "SUBMISSION_UNKNOWN"
 	default:
 		active.State = "QUEUED"
-		u.reason = "RPC_REJECTED"
+		u.reason = rejected
+		u.rejected = true
+		u.evidence = bodyJSON(map[string]any{"providerReasons": refusals})
 	}
 	if u.bump {
 		u.reason = "REPLACEMENT_REQUIRED"
@@ -255,7 +268,7 @@ func (s *Service) broadcast(ctx context.Context, t *Task, token string, u update
 }
 
 func (s *Service) finish(ctx context.Context, t Task, token string, u update) error {
-	oldReason, oldState := t.Reason, t.State
+	oldReason, oldState, oldWinner := t.Reason, t.State, t.Winner
 	t.State = u.state
 	t.Outcome = u.outcome
 	t.Reason = u.reason
@@ -263,12 +276,14 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 	t.Consuming = u.consuming
 	t.Execution = u.execution
 	t.Evidence = u.evidence
-	if u.outcome == "INCLUDED" || u.outcome == "REPLACED_EXTERNALLY" {
+	if u.winner != "" || u.outcome == "REPLACED_EXTERNALLY" {
 		var evidence map[string]json.RawMessage
 		if err := json.Unmarshal(u.evidence, &evidence); err != nil {
 			return err
 		}
-		evidence["observedAt"] = bodyJSON(time.Now().UTC())
+		if _, exists := evidence["observedAt"]; !exists {
+			evidence["observedAt"] = bodyJSON(time.Now().UTC())
+		}
 		t.Evidence = bodyJSON(evidence)
 	}
 	t.Revision++
@@ -300,6 +315,10 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 		for i := range t.Versions {
 			v := &t.Versions[i]
 			switch {
+			case t.Reason == "INCLUSION_REORGED" && v.State == "CONFIRMING":
+				v.State = "PENDING"
+			case t.State == "CONFIRMING" && v.Hash == t.Winner:
+				v.State = "CONFIRMING"
 			case t.Outcome == "INCLUDED" && v.Hash == t.Winner:
 				v.State = "INCLUDED"
 			case t.Outcome == "INCLUDED" && v.State != "EXPIRED":
@@ -338,7 +357,7 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 				return e
 			}
 		}
-		if t.Outcome == "INCLUDED" {
+		if t.Winner != "" && t.Winner != oldWinner {
 			if e = event(ctx, tx, t, "transaction.included"); e != nil {
 				return e
 			}
@@ -353,6 +372,8 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 			return event(ctx, tx, t, "transaction.closed")
 		case t.State == "RESIGN_REQUIRED" && oldState != t.State:
 			return event(ctx, tx, t, "solana.resign_required")
+		case u.rejected && !u.bump && t.Reason != oldReason:
+			return event(ctx, tx, t, "transaction.broadcast_rejected")
 		case u.bump && oldReason != t.Reason:
 			return event(ctx, tx, t, "transaction.replacement_required")
 		}
@@ -394,9 +415,17 @@ func (s *Service) process(ctx context.Context, t *Task, token string) error {
 	// Keep time for a durable transition even if archival reads time out.
 	observation, cancel := context.WithTimeout(ctx, 45*time.Second)
 	u := s.observe(observation, t, ps)
+	// Once inclusion has been observed, missing RPC data must not trigger another send or a request to sign again.
+	if t.State == "CONFIRMING" && !u.hasChainResult() {
+		if t.Family == EVM && (u.send || u.state == "QUEUED") && s.evmInclusionOrphaned(observation, ps, t.Evidence) {
+			u = update{state: "TRACKING", reason: "INCLUSION_REORGED"}
+		} else {
+			u = update{state: t.State, reason: t.Reason, winner: t.Winner, execution: t.Execution, evidence: t.Evidence}
+		}
+	}
 	cancel()
-	if t.Family != Solana && u.state != "CLOSED" && time.Since(t.Created) > time.Duration(s.cfg.TrackingHours)*time.Hour {
-		u = update{state: "CLOSED", outcome: "EXPIRED", reason: "TRACKING_DEADLINE", evidence: bodyJSON(map[string]any{"lastState": u.state, "lastReason": u.reason, "lastEvidence": u.evidence})}
+	if t.Family != Solana && u.state != "CONFIRMING" && u.state != "CLOSED" && time.Since(t.Created) > time.Duration(s.cfg.TrackingHours)*time.Hour {
+		u = update{state: "CLOSED", outcome: "EXPIRED", reason: "TRACKING_DEADLINE", evidence: bodyJSON(map[string]any{"lastState": u.state, "lastReason": u.reason, "lastEvidence": u.evidence, "previousReason": t.Reason, "previousEvidence": t.Evidence})}
 	}
 	if u.send {
 		// Continuously observe receipts. Throttle resends independently of reads.
@@ -407,6 +436,9 @@ func (s *Service) process(ctx context.Context, t *Task, token string) error {
 		}
 		if !t.Force && time.Since(time.UnixMilli(last)) < 15*time.Second {
 			u.send = false
+			if u.reason == "" {
+				u.reason, u.evidence = t.Reason, t.Evidence
+			}
 		} else {
 			if t.Family == EVM {
 				u = validateScheduledEVM(t, u)

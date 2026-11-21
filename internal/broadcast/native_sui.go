@@ -136,8 +136,13 @@ func (suiAdapter) lookup(ctx context.Context, _ *Service, p Endpoint, hash strin
 		return update{state: "TRACKING"}, nil
 	}
 	st := tx.GetEffects().GetStatus()
+	proof := map[string]any{"checkpoint": tx.GetCheckpoint()}
 	if st == nil || st.Success == nil {
-		return update{}, errNativeEvidence
+		return included(hash, "PENDING", proof), nil
 	}
-	return nativeIncluded(hash, st.GetSuccess(), map[string]any{"checkpoint": tx.GetCheckpoint()}), nil
+	u := nativeIncluded(hash, st.GetSuccess(), proof)
+	if !st.GetSuccess() && st.GetError() != nil && st.GetError().Kind != nil {
+		u.reason = "SUI_" + st.GetError().GetKind().String()
+	}
+	return u, nil
 }

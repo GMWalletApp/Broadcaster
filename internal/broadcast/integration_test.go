@@ -184,6 +184,8 @@ func TestBroadcastThreeVendorsAndReplacedHashWins(t *testing.T) {
 					return nil, &rpcError{-32603, "internal error"}
 				}
 				return v.Hash, nil
+			case "debug_traceTransaction":
+				return map[string]string{"error": "out of gas"}, nil
 			case "eth_getTransactionReceipt":
 				if mined.Load() && string(p[0]) == fmt.Sprintf("%q", v.Hash) {
 					return map[string]string{"transactionHash": v.Hash, "transactionIndex": "0x0", "blockHash": block, "blockNumber": "0x64", "status": "0x0"}, nil
@@ -200,7 +202,7 @@ func TestBroadcastThreeVendorsAndReplacedHashWins(t *testing.T) {
 		})
 		registerFixture(t, s, "1", fmt.Sprint(i), rpc.URL)
 	}
-	st, r := request(s, "POST", "/transactions", "test-token", map[string]string{"rawTransaction": raw})
+	st, r := request(s, "POST", "/EVM/transactions", "test-token", map[string]string{"rawTransaction": raw})
 	if st != 202 {
 		t.Fatal(st, r)
 	}
@@ -216,7 +218,7 @@ func TestBroadcastThreeVendorsAndReplacedHashWins(t *testing.T) {
 	mined.Store(true)
 	drive(t, s)
 	q = must(s.Store.lookup(t.Context(), "merchant", EVM, "1", v.Hash))
-	if q.Winner != v.Hash || q.Execution != "FAILED" || q.Versions[1].State != "REPLACED" {
+	if q.Winner != v.Hash || q.Execution != "FAILED" || q.Reason != "EVM_OUT_OF_GAS" || q.Versions[1].State != "REPLACED" {
 		t.Fatalf("wrong closure %+v", q)
 	}
 }

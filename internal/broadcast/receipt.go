@@ -71,9 +71,10 @@ func (s *Service) completeReceipt(ctx context.Context, t *Task) {
 			}
 		}
 		u.evidence = bodyJSON(originalFields)
-		r, err := s.Store.db.ExecContext(ctx, "UPDATE tasks SET execution=?,evidence=?,revision=revision+1 WHERE id=? AND revision=? AND state='CLOSED' AND outcome='INCLUDED' AND execution='UNKNOWN'", u.execution, []byte(u.evidence), t.ID, t.Revision)
+		r, err := s.Store.db.ExecContext(ctx, "UPDATE tasks SET execution=?,reason=?,evidence=?,revision=revision+1 WHERE id=? AND revision=? AND state='CLOSED' AND outcome='INCLUDED' AND execution='UNKNOWN'", u.execution, u.reason, []byte(u.evidence), t.ID, t.Revision)
 		if err == nil && affected(r) == 1 {
 			t.Execution = u.execution
+			t.Reason = u.reason
 			t.Evidence = u.evidence
 			t.Revision++
 		}

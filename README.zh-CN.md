@@ -18,7 +18,7 @@
 ```sh
 BASE=http://127.0.0.1:8080
 TX_HASH=$(jq -n --arg raw "$SIGNED_TX" '{rawTransaction: $raw}' |
-  curl -fsS "$BASE/transactions?chainId=1" \
+  curl -fsS "$BASE/EVM/transactions?chainId=1" \
     -H "Authorization: Bearer $BROADCASTER_API_TOKEN" \
     -H 'Content-Type: application/json' --data-binary @- |
   jq -er '.txHash')
@@ -37,10 +37,17 @@ TX_HASH=$(jq -n --arg raw "$SIGNED_TX" '{rawTransaction: $raw}' |
 }
 ```
 
-提交方看到 `INCLUDED` 就知道交易已入块，再看 `executionStatus` 判断执行结果。`FAILED` 表示已入块但执行失败，`UNKNOWN` 表示执行结果仍待核实。回调接收方按 `eventId` 去重。需要排查进度或补查结果时，可以用提交时返回的哈希查询。
+| 提交方看到的结果 | 含义 |
+|---|---|
+| `CONFIRMING`，`executionStatus=PENDING` | 已看到入块，正在等执行回执。Broadcaster 自动复查，付款继续显示「确认中」。 |
+| `CLOSED / INCLUDED`，`executionStatus=SUCCESS` | 已核实入块和执行成功。 |
+| `CLOSED / INCLUDED`，`executionStatus=FAILED` | 链上执行失败。读 `reason` 区分 Gas 耗尽、合约回退等原因，`evidence` 提供节点可用的诊断信息。 |
+| 提交返回 `409 NONCE_CONFLICT`，或某节点广播记录为 `REJECTED` | 前者表示本地 Nonce 已占用。后者查看该节点的 `reason`，例如费用过低、TRON 多签权重不足或签名账户无权限。 |
+
+回调接收方按 `eventId` 去重。排查进度或补查结果时，可用提交时返回的哈希查询。[失败原因和回调字段](docs/api.zh-CN.md#如何判断失败原因)
 
 ```sh
-curl -fsS "$BASE/transactions/$TX_HASH?chainId=1" \
+curl -fsS "$BASE/EVM/transactions/$TX_HASH?chainId=1" \
   -H "Authorization: Bearer $BROADCASTER_API_TOKEN" |
   jq '{taskState, taskOutcome, executionStatus}'
 ```
@@ -49,11 +56,11 @@ curl -fsS "$BASE/transactions/$TX_HASH?chainId=1" \
 
 ## 支持的网络
 
-| 主网 | 提交入口 |
-|---|---|
-| Ethereum、Arbitrum One、BNB Smart Chain、Avalanche C-Chain、Polygon PoS、OP Mainnet、Base、HyperEVM、Monad、Arc、Plasma、Robinhood Chain | `POST /transactions` |
-| Solana | `POST /solana/transactions` |
-| Bitcoin、TRON、Aptos、Sui、TON | `POST /networks/{network}/transactions` |
+| 主网 | 提交入口 | 接口文档 |
+|---|---|---|
+| Ethereum、Arbitrum One、BNB Smart Chain、Avalanche C-Chain、Polygon PoS、OP Mainnet、Base、HyperEVM、Monad、Arc、Plasma、Robinhood Chain | `POST /EVM/transactions` | [EVM](docs/api.zh-CN.md#evm-调用方接口) |
+| Solana | `POST /solana/transactions` | [Solana](docs/api.zh-CN.md#solana-代付交易) |
+| Bitcoin、TRON、Aptos、Sui、TON | `POST /networks/{network}/transactions` | [Bitcoin · TRON · Aptos · Sui · TON](docs/api.zh-CN.md#非-evm-调用方接口) |
 
 EVM 签名前可以查询推荐 nonce。比如链上返回 20，队列已占用 20、21、23，服务会推荐 22。Solana 代付时，用户和代付方先签署同一份消息；如果 blockhash 过期，服务会核查原交易是否入块，再决定是否要求重签。[EVM nonce 与替换](docs/api.zh-CN.md#evm-nonce-查询与任务排序) · [Solana 代付](docs/api.zh-CN.md#solana-代付交易) · [其他五条链的签名格式](docs/api.zh-CN.md#原生链广播接口)
 

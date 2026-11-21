@@ -95,6 +95,7 @@ type Delivery struct {
 	Endpoint string    `json:"endpointId"`
 	State    string    `json:"state"`
 	Detail   string    `json:"detail,omitempty"`
+	Reason   string    `json:"reason,omitempty"`
 	Started  time.Time `json:"startedAt"`
 	Latency  int64     `json:"latencyMs"`
 }

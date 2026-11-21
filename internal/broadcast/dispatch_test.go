@@ -124,7 +124,7 @@ func TestExpiredSolanaSignatureFoundInFinalizedHistory(t *testing.T) {
 	})
 	p := Endpoint{secret: endpointSecret{URL: srv.URL}}
 	result, e := s.solExpiry(t.Context(), p, &Task{}, v)
-	if e != nil || result.state != "CLOSED" || result.winner != v.Hash || result.outcome != "INCLUDED" {
+	if e != nil || result.state != "CONFIRMING" || result.winner != v.Hash || result.execution != "PENDING" || result.outcome != "" {
 		t.Fatal(result, e)
 	}
 }

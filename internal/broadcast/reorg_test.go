@@ -38,7 +38,7 @@ func TestEVMForkConvergenceAndTerminalSnapshot(t *testing.T) {
 		t.Fatal(status)
 	}
 	forkA, forkB := "0x"+strings.Repeat("a", 64), "0x"+strings.Repeat("b", 64)
-	var converged, closed atomic.Bool
+	var converged, closed, receiptReady atomic.Bool
 	for i := range 2 {
 		rpc := rpcServer(t, func(method string, args []json.RawMessage) (any, *rpcError) {
 			winner, head := replacement.Hash, forkB
@@ -54,7 +54,7 @@ func TestEVMForkConvergenceAndTerminalSnapshot(t *testing.T) {
 					// Cached receipt survives fork A even after the block has been displaced.
 					return map[string]string{"transactionHash": h, "blockHash": forkA, "blockNumber": "0x15", "transactionIndex": "0x0", "status": "0x1"}, nil
 				}
-				if h == winner && closed.Load() {
+				if h == winner && (closed.Load() || receiptReady.Load()) {
 					return map[string]string{"transactionHash": h, "blockHash": head, "blockNumber": "0x15", "transactionIndex": "0x0", "status": "0x0"}, nil
 				}
 				return nil, nil
@@ -81,12 +81,22 @@ func TestEVMForkConvergenceAndTerminalSnapshot(t *testing.T) {
 	s = service(t, path)
 	drive(t, s)
 	q = must(s.Store.lookup(t.Context(), "merchant", EVM, "1", old.Hash))
-	if q.Outcome != "INCLUDED" || q.Winner != replacement.Hash || q.Execution != "UNKNOWN" || q.Versions[0].State != "REPLACED" {
+	if q.State != "CONFIRMING" || q.Outcome != "" || q.Winner != replacement.Hash || q.Execution != "PENDING" || eventCount(t, s, "transaction.closed") != 0 {
 		t.Fatal(q)
 	}
+	drive(t, s)
+	if eventCount(t, s, "transaction.included") != 1 || eventCount(t, s, "transaction.closed") != 0 {
+		t.Fatal("premature notification")
+	}
+	if status, _ := request(s, "POST", "/transactions/"+replacement.Hash+"/force", "test-token", map[string]string{"reason": "manual"}); status != 409 {
+		t.Fatal(status)
+	}
+	receiptReady.Store(true)
+	s = service(t, path)
+	drive(t, s)
 	closed.Store(true)
 	code, body := request(s, "GET", "/transactions/"+replacement.Hash, "test-token", nil)
-	if code != 200 || body["winningHash"] != replacement.Hash || body["executionStatus"] != "UNKNOWN" || body["evidence"].(map[string]any)["blockHash"] != forkB {
+	if code != 200 || body["winningHash"] != replacement.Hash || body["executionStatus"] != "FAILED" || body["reason"] != "EXECUTION_CAUSE_UNAVAILABLE" || body["evidence"].(map[string]any)["blockHash"] != forkB {
 		t.Fatal(code, body)
 	}
 	if _, _, err := s.claim(t.Context()); err != notFound || eventCount(t, s, "transaction.closed") != 1 {

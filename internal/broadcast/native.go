@@ -49,7 +49,11 @@ func nativeIncluded(hash string, success bool, evidence any) update {
 	if !success {
 		execution = "FAILED"
 	}
-	return included(hash, execution, evidence)
+	u := included(hash, execution, evidence)
+	if !success {
+		u.reason = "EXECUTION_CAUSE_UNAVAILABLE"
+	}
+	return u
 }
 
 func nativeVersion(hash, raw string) Version { return Version{Hash: hash, Raw: raw, State: "READY"} }

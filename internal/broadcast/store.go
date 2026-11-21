@@ -167,6 +167,9 @@ func (s *Store) lookup(ctx context.Context, owner string, f Family, network, has
 			if e = rows.Scan(&h, &d.ID, &d.Round, &d.Provider, &d.Endpoint, &d.State, &d.Detail, &started, &d.Latency); e != nil {
 				return e
 			}
+			if d.State == "REJECTED" {
+				d.Reason = rejectionReason(t.Family, d.Detail)
+			}
 			d.Started = time.UnixMilli(started).UTC()
 			v := &t.Versions[indexes[h]]
 			v.Broadcasts = append(v.Broadcasts, d)
@@ -290,7 +293,7 @@ func (s *Store) replace(ctx context.Context, owner, old string, input Task, v Ve
 				active = candidate
 			}
 		}
-		if t.Active != old || t.State == "CLOSED" || t.State == "RESOLVING_NONCE" {
+		if t.Active != old || t.State == "CLOSED" || t.State == "RESOLVING_NONCE" || t.State == "CONFIRMING" {
 			return conflict("VERSION_NOT_REPLACEABLE")
 		}
 		if input.Sender != t.Sender || input.Nonce != t.Nonce {

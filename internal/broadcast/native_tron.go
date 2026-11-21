@@ -32,7 +32,10 @@ func (tronAdapter) decode(in NativeRequest) (Version, error) {
 }
 
 type tronTxRef struct {
-	ID string `json:"txID"`
+	ID      string `json:"txID"`
+	Results []struct {
+		Status string `json:"contractRet"`
+	} `json:"ret"`
 }
 
 type tronBlock struct {
@@ -64,8 +67,8 @@ func (tronAdapter) height(ctx context.Context, s *Service, p Endpoint) (int64, e
 
 func (tronAdapter) send(ctx context.Context, s *Service, p Endpoint, v Version) error {
 	var reply struct {
-		Result     *bool
-		Code, Txid string
+		Result              *bool
+		Code, Txid, Message string
 	}
 	_, err := s.nativeHTTP(ctx, p, "/wallet/broadcasthex", nil, "application/json", bodyJSON(map[string]string{"transaction": v.Raw}), &reply)
 	if err != nil {
@@ -73,6 +76,13 @@ func (tronAdapter) send(ctx context.Context, s *Service, p Endpoint, v Version) 
 	}
 	if reply.Code == "DUP_TRANSACTION_ERROR" {
 		return &rpcError{Message: "already known"}
+	}
+	if (reply.Result == nil || !*reply.Result) && reply.Code != "" {
+		switch reply.Code {
+		case "SERVER_BUSY", "NO_CONNECTION", "NOT_ENOUGH_EFFECTIVE_CONNECTION":
+			return &transportError{"TRON node unavailable: " + reply.Code}
+		}
+		return &rpcError{Message: tronRejection(reply.Code, reply.Message)}
 	}
 	if reply.Result == nil {
 		return errNativeEvidence
@@ -88,10 +98,10 @@ func (tronAdapter) send(ctx context.Context, s *Service, p Endpoint, v Version) 
 
 func (tronAdapter) lookup(ctx context.Context, s *Service, p Endpoint, hash string) (update, error) {
 	var info struct {
-		Error       string
-		ID, Result  string
-		BlockNumber *int64
-		Receipt     struct{ Result string }
+		Error                  string
+		ID, Result, ResMessage string
+		BlockNumber            *int64
+		Receipt                struct{ Result string }
 	}
 	_, err := s.nativeHTTP(ctx, p, "/walletsolidity/gettransactioninfobyid", nil, "application/json", bodyJSON(map[string]string{"value": hash}), &info)
 	if err != nil {
@@ -111,11 +121,52 @@ func (tronAdapter) lookup(ctx context.Context, s *Service, p Endpoint, hash stri
 	if err != nil {
 		return update{}, err
 	}
-	if block.ID == "" || block.Header.Data.Number == nil || *block.Header.Data.Number != *info.BlockNumber || !slices.ContainsFunc(block.Transactions, func(tx tronTxRef) bool {
-		return tx.ID == hash
-	}) {
+	index := slices.IndexFunc(block.Transactions, func(tx tronTxRef) bool { return tx.ID == hash })
+	if block.ID == "" || block.Header.Data.Number == nil || *block.Header.Data.Number != *info.BlockNumber || index < 0 {
 		return update{}, errNativeEvidence
 	}
-	ok := info.Result != "FAILED" && (info.Receipt.Result == "" || info.Receipt.Result == "SUCCESS")
-	return nativeIncluded(hash, ok, map[string]any{"blockNumber": *info.BlockNumber, "blockHash": block.ID}), nil
+	proof := map[string]any{"blockNumber": *info.BlockNumber, "blockHash": block.ID}
+	result := info.Receipt.Result
+	if result == "DEFAULT" {
+		result = ""
+	}
+	for _, contract := range block.Transactions[index].Results {
+		if contract.Status == "" || contract.Status == "DEFAULT" {
+			continue
+		}
+		if result != "" && result != contract.Status {
+			return update{}, errNativeEvidence
+		}
+		result = contract.Status
+	}
+	if result == "" && (info.Result == "SUCESS" || info.Result == "SUCCESS") {
+		result = "SUCCESS"
+	}
+	if result == "" && info.Result != "FAILED" {
+		return included(hash, "PENDING", proof), nil
+	}
+	if result == "SUCCESS" && info.Result == "FAILED" {
+		return update{}, errNativeEvidence
+	}
+	ok := result == "SUCCESS"
+	if !ok && info.ResMessage != "" {
+		proof["executionDetail"] = limitedDetail(tronText(info.ResMessage))
+	}
+	u := nativeIncluded(hash, ok, proof)
+	if !ok {
+		switch result {
+		case "OUT_OF_ENERGY":
+			u.reason = "TRON_OUT_OF_ENERGY"
+		case "OUT_OF_TIME":
+			u.reason = "TRON_OUT_OF_TIME"
+		case "REVERT":
+			u.reason = "TRON_REVERTED"
+		default:
+			if result != "" && result != "DEFAULT" {
+				proof["receiptResult"] = limitedDetail(result)
+				u.evidence = bodyJSON(proof)
+			}
+		}
+	}
+	return u, nil
 }

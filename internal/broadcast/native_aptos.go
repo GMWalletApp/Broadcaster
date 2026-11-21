@@ -56,6 +56,7 @@ func (aptosAdapter) send(ctx context.Context, s *Service, p Endpoint, v Version)
 func (aptosAdapter) lookup(ctx context.Context, s *Service, p Endpoint, hash string) (update, error) {
 	var tx struct {
 		Hash, Type, Version string
+		VMStatus            string `json:"vm_status"`
 		Success             *bool
 	}
 	status, err := s.nativeHTTP(ctx, p, "/transactions/by_hash/"+hash, nil, "", nil, &tx)
@@ -71,8 +72,19 @@ func (aptosAdapter) lookup(ctx context.Context, s *Service, p Endpoint, hash str
 	if tx.Type == "pending_transaction" {
 		return nativeTracking(), nil
 	}
-	if _, err := strconv.ParseUint(tx.Version, 10, 64); err != nil || tx.Type != "user_transaction" || tx.Success == nil {
+	if _, err := strconv.ParseUint(tx.Version, 10, 64); err != nil || tx.Type != "user_transaction" {
 		return update{}, errNativeEvidence
 	}
-	return nativeIncluded(hash, *tx.Success, map[string]string{"ledgerVersion": tx.Version}), nil
+	proof := map[string]string{"ledgerVersion": tx.Version}
+	if tx.Success == nil {
+		return included(hash, "PENDING", proof), nil
+	}
+	if !*tx.Success && tx.VMStatus != "" {
+		proof["executionDetail"] = limitedDetail(tx.VMStatus)
+	}
+	u := nativeIncluded(hash, *tx.Success, proof)
+	if proof["executionDetail"] != "" {
+		u.reason = "APTOS_VM_ERROR"
+	}
+	return u, nil
 }

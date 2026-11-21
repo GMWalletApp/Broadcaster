@@ -35,9 +35,12 @@ func solIncluded(hash string, status *solObservation) update {
 	if string(status.Error) == "null" {
 		execution = "SUCCESS"
 	} else if len(status.Error) == 0 {
-		execution = "UNKNOWN"
+		execution = "PENDING"
 	}
 	u := included(hash, execution, status)
+	if execution == "FAILED" {
+		u.reason = solanaFailure(status.Error)
+	}
 	u.finalized = status.Commitment == "finalized"
 	u.slot = status.Slot
 	return u
@@ -109,7 +112,10 @@ func (s *Service) solExpiry(ctx context.Context, p Endpoint, t *Task, v Version)
 		}
 		for _, sig := range block.Signatures {
 			if sig == v.Hash {
-				u := included(sig, "UNKNOWN", map[string]any{"slot": cur.Slot, "blockhash": block.Hash})
+				if status := s.solExecution(ctx, p, sig, cur.Slot, "finalized"); status != nil {
+					return solIncluded(sig, status), nil
+				}
+				u := included(sig, "PENDING", map[string]any{"slot": cur.Slot, "blockhash": block.Hash})
 				u.finalized, u.slot = true, cur.Slot
 				return u, nil
 			}
@@ -129,7 +135,39 @@ func (s *Service) solExpiry(ctx context.Context, p Endpoint, t *Task, v Version)
 	return checking, nil
 }
 
+// Finalized block history may keep the signature after the status index is pruned.
+func (s *Service) solExecution(ctx context.Context, p Endpoint, hash string, slot uint64, commitment string) *solObservation {
+	var tx *struct {
+		Slot        uint64
+		Transaction struct{ Signatures []string }
+		Meta        *struct {
+			Error json.RawMessage `json:"err"`
+		}
+	}
+	params := []any{hash, map[string]any{"commitment": commitment, "encoding": "json", "maxSupportedTransactionVersion": 0}}
+	if s.call(ctx, p, "getTransaction", params, &tx) != nil || tx == nil || tx.Slot != slot || len(tx.Transaction.Signatures) == 0 || tx.Transaction.Signatures[0] != hash || tx.Meta == nil || len(tx.Meta.Error) == 0 {
+		return nil
+	}
+	return &solObservation{Slot: slot, Commitment: commitment, Error: tx.Meta.Error}
+}
+
 func (s *Service) observeSolana(ctx context.Context, p Endpoint, t *Task) (update, error) {
+	if t.State == "CONFIRMING" {
+		var proof struct {
+			Slot       uint64
+			Blockhash  string
+			Commitment string `json:"confirmationStatus"`
+		}
+		if json.Unmarshal(t.Evidence, &proof) == nil && (proof.Blockhash != "" || proof.Commitment == "finalized") && proof.Slot > 0 {
+			if status := s.solExecution(ctx, p, t.Winner, proof.Slot, "finalized"); status != nil {
+				return solIncluded(t.Winner, status), nil
+			}
+			if status, err := s.solStatus(ctx, p, t.Winner); err == nil && status != nil && status.Slot == proof.Slot && status.Commitment == "finalized" && len(status.Error) > 0 {
+				return solIncluded(t.Winner, status), nil
+			}
+			return update{}, errors.New("finalized execution metadata unavailable")
+		}
+	}
 	var active *Version
 	var processedSlot uint64
 	var lookupErr error
@@ -151,6 +189,11 @@ func (s *Service) observeSolana(ctx context.Context, p Endpoint, t *Task) (updat
 		}
 		switch status.Commitment {
 		case "confirmed", "finalized":
+			if len(status.Error) == 0 {
+				if full := s.solExecution(ctx, p, v.Hash, status.Slot, status.Commitment); full != nil {
+					status = full
+				}
+			}
 			return solIncluded(v.Hash, status), nil
 		case "processed":
 			processedSlot = max(processedSlot, status.Slot)

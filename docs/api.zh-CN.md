@@ -1,6 +1,6 @@
 # 接口与交易生命周期
 
-[返回中文首页](../README.zh-CN.md) · [18 条主网配置](../config.mainnets.json)
+[EVM 调用方接口](#evm-调用方接口) · [非 EVM 调用方接口](#非-evm-调用方接口) · [失败原因](#如何判断失败原因) · [返回中文首页](../README.zh-CN.md) · [18 条主网配置](../config.mainnets.json)
 
 在 EVM 上，签名方自行查询和选取 Nonce、构造交易并签名，也负责签署加价替换版本。Broadcaster 从已签名原文恢复外层发送地址和 Nonce，按账户调度已接收任务。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
 
@@ -29,16 +29,16 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 
 ## EVM 调用方接口
 
-交易提交和管理操作需要鉴权，查询和变更限定在调用方有权访问的任务或账户内。POST 和 PATCH 的请求体使用 JSON。下表中的 rawTransaction 是完整的十六进制已签名原文。Hash 路径支持用 chainId 查询参数限定网络；出现跨链歧义时必须指定链。
+本节所有接口使用大写 `/EVM` 前缀。旧客户端可继续使用原有的无前缀路径。交易提交和管理操作需要鉴权，查询和变更限定在调用方有权访问的任务或账户内。POST 和 PATCH 的请求体使用 JSON。下表中的 rawTransaction 是完整的十六进制已签名原文。Hash 路径支持用 chainId 查询参数限定网络；出现跨链歧义时必须指定链。
 
 | 方法与路径 | 输入 | 响应与副作用 |
 |---|---|---|
-| POST /transactions | rawTransaction | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由其他活动任务占用时返回 409 NONCE_CONFLICT。 |
-| GET /transactions/{hash} | 原始或替换 Hash | 返回 200，包含任务阶段和结果、所查 Hash 的状态、当前调度版本、全部候选、各轮各节点结果、链上证据及 7702 诊断。未知或不可见的 Hash 返回 404。 |
-| POST /transactions/{hash}/force | reason | 对当前可调度版本立即安排一轮广播，记录操作者、时间和原因，返回 202。只跳过本地 Nonce 排序，仍受节点冷却、可用性及链上状态约束。同一轮已排队或在途时复用该轮。 |
-| POST /transactions/{hash}/replacement | rawTransaction | 用路径指定待替换的当前版本。新签名交易通过校验，且 chainId、sender、nonce 相同后，在原任务下登记新 Hash，返回 202。重复提交同一已登记替换版本返回 200。原 Hash 继续接受链上监控。 |
-| GET /accounts/{address}/queue?chainId=… | 地址、目标链 | 按外层 Nonce 升序返回未关闭任务、当前版本、排队原因和下次调度时间。队列只列已接收的任务。 |
-| GET /accounts/{address}/nonce?chainId=… | 地址、目标链，可选 blockTag（latest 或 pending） | 返回最新链上 chainNonce 及结合队列的推荐 nonce。指定 pending 时还返回同一节点的 pendingNonce。均为十进制字符串。所有节点读取失败返回 503 NONCE_VIEW_UNAVAILABLE。 |
+| `POST /EVM/transactions` | rawTransaction | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由其他活动任务占用时返回 409 NONCE_CONFLICT。 |
+| `GET /EVM/transactions/{hash}` | 原始或替换 Hash | 返回 200，包含任务阶段和结果、所查 Hash 的状态、当前调度版本、全部候选、各轮各节点结果、链上证据及 7702 诊断。未知或不可见的 Hash 返回 404。 |
+| `POST /EVM/transactions/{hash}/force` | reason | 对当前可调度版本立即安排一轮广播，记录操作者、时间和原因，返回 202。只跳过本地 Nonce 排序，仍受节点冷却、可用性及链上状态约束。同一轮已排队或在途时复用该轮。 |
+| `POST /EVM/transactions/{hash}/replacement` | rawTransaction | 用路径指定待替换的当前版本。新签名交易通过校验，且 chainId、sender、nonce 相同后，在原任务下登记新 Hash，返回 202。重复提交同一已登记替换版本返回 200。原 Hash 继续接受链上监控。 |
+| `GET /EVM/accounts/{address}/queue?chainId=…` | 地址、目标链 | 按外层 Nonce 升序返回未关闭任务、当前版本、排队原因和下次调度时间。队列只列已接收的任务。 |
+| `GET /EVM/accounts/{address}/nonce?chainId=…` | 地址、目标链，可选 blockTag（latest 或 pending） | 返回最新链上 chainNonce 及结合队列的推荐 nonce。指定 pending 时还返回同一节点的 pendingNonce。均为十进制字符串。所有节点读取失败返回 503 NONCE_VIEW_UNAVAILABLE。 |
 
 **冲突与错误。** 原文无法解码、签名无效、链未启用或整笔交易违反协议规则时，提交返回 4xx 和具体原因，校验失败的请求不占用 Nonce。已有 Hash 的幂等查询优先于依赖当前链状态的预检，先校验调用方访问权限。活动 EVM 任务的唯一键为 (chainId, sender, nonce)，签名交易以 (chainId, txHash) 去重。Hash 幂等检查与新任务插入在同一事务内完成，唯一键冲突时重新读取已提交的任务作判定。并发 replacement 使用当前版本的条件更新；对过时版本提交不同的新 Hash、在核查 Nonce 消耗者或已关闭时尝试替换，以及对不可调度版本执行 force，均返回 409 和原因。已关闭任务保留提交历史及终止结果。
 
@@ -50,16 +50,31 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 
 202 表示服务已持久化任务。调用方可用返回的 Hash 查询进度；自动重播、查回执和故障恢复无需调用 retry 接口。
 
+## 非 EVM 调用方接口
+
+使用业务 Bearer Token，以 JSON 提交签名原文。首次受理返回 HTTP 202 和 `taskId`。Solana 返回 `signature`，其余五条链返回 `txHash`。查询返回 HTTP 200 和任务状态，重复提交同一笔已登记交易返回原任务。
+
+| 主网 | 提交 | 查询 | 请求体与查询标识 |
+|---|---|---|---|
+| Solana | `POST /solana/transactions` | `GET /solana/transactions/{signature}?cluster=solana` | 传 `cluster`、`paymentId`、全签的 Base64 `signedTransaction`、`context.slot` 和 `lastValidBlockHeight`。用第一份签名查询。 |
+| Bitcoin | `POST /networks/bitcoin/transactions` | `GET /networks/bitcoin/transactions/{txHash}` | `rawTransaction` 为十六进制 wire 交易，用 txid 查询。 |
+| TRON | `POST /networks/tron/transactions` | `GET /networks/tron/transactions/{txHash}` | `rawTransaction` 为含全部签名的十六进制 protobuf 交易，用 txID 查询。 |
+| Aptos | `POST /networks/aptos/transactions` | `GET /networks/aptos/transactions/{txHash}` | `rawTransaction` 为 Base64 编码的 BCS SignedTransaction，用用户交易哈希查询。 |
+| Sui | `POST /networks/sui/transactions` | `GET /networks/sui/transactions/{txHash}` | 传 Base64 `rawTransaction`（TransactionData）和 Base64 `signatures` 数组，用 digest 查询。 |
+| TON | `POST /networks/ton/transactions` | `GET /networks/ton/transactions/{txHash}` | `rawTransaction` 为 Base64 编码的外部入站消息 BOC，用服务返回的规范化消息哈希查询。 |
+
+Solana 任务进入 `RESIGN_REQUIRED` 后，调用 `POST /solana/transactions/{signature}/resign`，提交使用新 blockhash 的完整双签交易。其他五条链各自的入块依据和 RPC 要求见下文。[Solana 代付与重签](#solana-代付交易) · [五条原生链的节点与入块依据](#原生链广播接口)
+
 ## EVM Nonce 查询与任务排序
 
-每次 `GET /accounts/{address}/nonce?chainId=…` 随机选择一个健康 RPC 读取 `eth_getTransactionCount(address,"latest")`，失败后换下一家。接口从链上值开始，跳过同链同发送方所有调用方的连续活动任务，返回第一个空位。可选 `blockTag=pending` 会在同一节点再读取 pending，从两者较大值开始。只有 latest 能触发已占用 Nonce 的链上核查。[Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/#eth_gettransactioncount)
+每次 `GET /EVM/accounts/{address}/nonce?chainId=…` 随机选择一个健康 RPC 读取 `eth_getTransactionCount(address,"latest")`，失败后换下一家。接口从链上值开始，跳过同链同发送方所有调用方的连续活动任务，返回第一个空位。可选 `blockTag=pending` 会在同一节点再读取 pending，从两者较大值开始。只有 latest 能触发已占用 Nonce 的链上核查。[Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/#eth_gettransactioncount)
 
 例如链上返回 20，本地活动任务占用 20、21、23，默认响应含 `"chainNonce":"20","nonce":"22"`。签名交易成功入队时才占用槽位；查询本身不预留，也不保存链上读数或推荐值。7702 代付时对代付地址调用此接口，为外层签名选择 Nonce；用户授权使用用户自己的账户 Nonce。
 
 ~~~mermaid
 flowchart TD
     Read["GET nonce：随机 RPC 查 latest，再查活动队列"] --> Sign["选取外层发送账户的 Nonce，签名"]
-    Sign --> Submit["POST /transactions：原子登记任务"]
+    Sign --> Submit["POST /EVM/transactions：原子登记任务"]
     Submit -->|相同 Hash| Existing["返回已有任务"]
     Submit -->|不同 Hash 且任务键冲突| Conflict["409 NONCE_CONFLICT，本次提交不入队"]
     Submit -->|新任务| Queue["按链、外层发送方和 Nonce 排队"]
@@ -70,7 +85,7 @@ flowchart TD
 
 数据库保存签名原文及任务键 (chainId, sender, nonce)，用于并发判重、排序和重启恢复。若两个服务都在第一笔交易入队前查询，它们可能拿到同一个推荐值。不同交易使用同一槽位时，只有一次普通提交能创建任务。另一笔若是独立付款，由签名方再次查询推荐值后重新签名。只有同一任务的有意替换才用 replacement。
 
-发现外层账户的链上 Nonce 已越过本地任务时，逐笔核查候选 Hash。自己的版本入块则正常关闭；证实外部消耗则通知原提交方并重新调度剩余任务；证据不足则暂停该任务重播并继续核查。查询发现低于 latest 的排队或跟踪任务，会在同一数据库事务内转入 RESOLVING_NONCE 并唤醒工作实例。工作实例核实结果后通知上游。已关闭任务保留 Hash 历史；若链上槽位仍可用，它可以被新任务使用。过期任务的原文仍可能入块，重付前须核对业务结果。
+发现外层账户的链上 Nonce 已越过本地任务时，逐笔核查候选 Hash。自己的版本入块则核查执行结果后关闭；证实外部消耗则通知原提交方并重新调度剩余任务；证据不足则暂停该任务重播并继续核查。查询发现低于 latest 的排队或跟踪任务，会在同一数据库事务内转入 RESOLVING_NONCE 并唤醒工作实例。工作实例核实结果后通知上游。已关闭任务保留 Hash 历史；若链上槽位仍可用，它可以被新任务使用。过期任务的原文仍可能入块，重付前须核对业务结果。
 
 ## RPC 节点管理
 
@@ -141,9 +156,19 @@ EVM 使用 eth_blockNumber 记录端点延迟、最后高度和最近推进时�
 
 ## EVM 交易生命周期
 
-**结束条件是候选 Hash 已出现在观测时的规范区块中。** 保存交易 Hash、区块号、区块 Hash、交易索引和观测时间。可通过区块交易列表或与规范区块核对过的回执建立入块证据；只有 RPC 接收或 pending 交易对象时继续跟踪。入块即结束广播任务，关闭后不追踪区块重组，也不承诺链级最终性。
+核实交易在规范区块中后，Broadcaster 停止重播并保存区块证据。若同轮已取得执行结果，直接关闭并回调提交方。只有入块证据时，任务进入 `CONFIRMING`，`executionStatus=PENDING`，暂不设置 `taskOutcome`。后台继续查回执，重启后自动恢复。此时禁止强制广播、替换和过期重签。已关闭任务保留当时的链上快照。
 
-任务汇总一个业务提交及其替换版本；签名交易记录每个 Hash；广播记录保存某 Hash 向一家供应商的一次请求。接口分别返回 taskState、taskOutcome、executionStatus。入块结果为 INCLUDED。回执 status 为 1 时 executionStatus 为 SUCCESS，0 为 FAILED，暂缺回执则为 UNKNOWN。查询可在取得同一区块的回执后补充执行结果。回执失败的交易同样已入块。[EIP-658 回执状态](https://eips.ethereum.org/EIPS/eip-658)
+### 如何判断失败原因
+
+| 阶段 | 字段或事件 | 例子 |
+|---|---|---|
+| 提交 | HTTP 错误体的 `error` | `NONCE_CONFLICT` 表示同一账户的本地活动任务已占用该 Nonce。已核实由其他交易消耗时返回 `NONCE_CONSUMED`。 |
+| 广播 | 每条 `attempts[].broadcasts[].reason`、`detail` | EVM 可以返回 `NONCE_TOO_LOW`、`INSUFFICIENT_FUNDS`、`INTRINSIC_GAS_TOO_LOW` 或 `FEE_TOO_LOW`。TRON 可区分 `TRON_SIGNATURE_WEIGHT_INSUFFICIENT`、`TRON_PERMISSION_DENIED` 和 `TRON_SIGNATURE_INVALID`。一路接收即继续跟踪。 |
+| 确认外部覆盖 | `transaction.nonce_conflict` 和 `transaction.closed` 的 `data.reason` | `NONCE_CONSUMED_EXTERNALLY` 附消耗该 Nonce 的交易和区块。 |
+| EVM 执行 | `executionStatus=FAILED`，`reason` | 通过失败交易的顶层 trace 区分 `EVM_OUT_OF_GAS`、`EVM_REVERTED` 和 `EVM_VM_ERROR`。有回退说明时见 `evidence.revertReason`。只有失败回执时返回 `EXECUTION_CAUSE_UNAVAILABLE`。 |
+| 其他链执行 | `executionStatus=FAILED`，`reason` 和 `evidence` | TRON 可报 `TRON_OUT_OF_ENERGY`、`TRON_REVERTED`；Solana 保留原生 `err`（如指令下标和程序错误码）；Aptos 保留 VM 状态文本；Sui 返回节点提供的错误类型；TON 可附计算或动作阶段的退出码。 |
+
+此前没有接收记录且本轮全部明确拒收时，查询可查看每个供应商的诊断。回调的 `data.evidence.providerReasons` 列出本轮各家供应商的原因。首次出现该拒收原因或原因改变时，提交方收到 `transaction.broadcast_rejected`；需要加价时收到 `transaction.replacement_required`。入块后的 `transaction.closed` 用 `data.reason` 和 `data.evidence` 报告执行失败。历史版本已发送的关闭事件保留原语义，旧的 `CLOSED / INCLUDED / UNKNOWN` 仍可按哈希补查。[EVM 回执](https://eips.ethereum.org/EIPS/eip-658) · [Geth 调用跟踪](https://geth.ethereum.org/docs/developers/evm-tracing/built-in-tracers) · [TRON 签名权限](https://developers.tron.network/docs/multi-signature)
 
 ~~~mermaid
 flowchart TD
@@ -155,9 +180,13 @@ flowchart TD
     T -->|规范区块视图分歧| R
     R -->|链回退且仍缺前序 Nonce| Q
     R -->|重新核实该值可调度| T
-    Q -->|候选已在块内| I["CLOSED / INCLUDED"]
-    T -->|候选已在块内| I
-    R -->|本任务任一候选在块内| I
+    Q -->|候选已在块内| B{"执行结果已取得？"}
+    B -->|是| I["CLOSED / INCLUDED"]
+    B -->|否| C["CONFIRMING / PENDING"]
+    C -->|后台核实成功或失败| I
+    C -->|复核证实原块已重组且可重新调度| T
+    T -->|候选已在块内| B
+    R -->|本任务任一候选在块内| B
     R -->|证实外部消耗| X["CLOSED / REPLACED_EXTERNALLY"]
     X --> N["通知提交方，重排该账户的剩余任务"]
     I --> A["通知提交方，唤醒该账户后续任务"]
@@ -175,13 +204,16 @@ flowchart TD
 | TRACKING | RPC 返回接收、拒绝、超时，或签名方提供替换交易 | 保持 TRACKING，更新对应 Hash 和节点记录。替换版本开始调度，旧版本停止主动重播，仍参与入块核查。 |
 | QUEUED / TRACKING | 规范链账户 Nonce 已大于本地交易 Nonce，尚未核实消耗者 | RESOLVING_NONCE。暂停该任务调度；查所有候选及区块。 |
 | RESOLVING_NONCE | 证据不足，或复核发现此前读数已失效 | 有分歧时保持核查。链上 Nonce 回退后，若缺前序值则回 QUEUED / NONCE_GAP，具备发送条件则回 TRACKING。 |
-| 任意未关闭状态 | 在当前规范区块核实任务内某个 Hash | CLOSED / INCLUDED，记录 winningHash 及独立执行结果，其他候选记 REPLACED。通知上游并更新账户队列。 |
+| 任意未关闭状态 | 只核实任务内某个 Hash 入块，缺少执行回执 | CONFIRMING / PENDING。自动复查，不发结束回调。 |
+| 任意未关闭状态 | 在当前规范区块核实任务内某个 Hash 和执行结果 | CLOSED / INCLUDED，记录 winningHash 及独立执行结果，其他候选记 REPLACED。通知上游并更新账户队列。 |
 | RESOLVING_NONCE | 定位到任务外交易消耗该 Nonce（含已生效的 7702 授权） | CLOSED / REPLACED_EXTERNALLY。返回错误 NONCE_CONSUMED_EXTERNALLY、受影响的本地 Nonce 和 Hash、消耗者及区块，停止全部候选。通知原提交方并重排队列。 |
-| 未关闭状态 | 所有候选永久无效且证据充分 / 配置的追踪期限到达 | 分别以 CLOSED / REJECTED 或 CLOSED / EXPIRED 结束。后者保留最后观测，已发原文仍可能上链。 |
+| 尚未核实入块 | 所有候选永久无效且证据充分 / 配置的追踪期限到达 | 分别以 CLOSED / REJECTED 或 CLOSED / EXPIRED 结束。后者保留最后观测，已发原文仍可能上链。 |
 
 已接收任务的外部覆盖通过 GET 任务结果和异步事件报告。核查期间查询可见 RESOLVING_NONCE；单个 RPC 拒绝、空回执、链上 Nonce 增长都不能单独证明“外部覆盖”。已绑定 Hash 的本地任务历史可追溯；新的签名交易不得复用被链上消耗的槽位。
 
 **重组与供应商分歧。** 每轮并行核查可读端点。发现候选入块或外部消耗时，在回执查询、7702 诊断和历史查询完成后，重新按高度读取见证节点的规范块，并比对其他可读节点在该高度的区块 Hash。任一节点给出不同的块、候选赢家或明确相反的执行结果，任务进入 `RESOLVING_NONCE / CHAIN_VIEW_CONFLICT`，暂停重播，下一轮复核。落后节点尚无该块或暂时读不到时，可依据一家完成核查的供应商关闭。一个旧候选的孤块回执不会挡住新候选的核查。任务保存获胜 Hash、区块及观测时间，只向上游报告一次逻辑关闭事件。关闭之后发生重组，查询仍返回已保存的入块快照；依赖最终性的结算方需自行等待目标链的最终性条件。[EIP-1898 对跨 RPC 读取一致性的说明](https://eips.ethereum.org/EIPS/eip-1898)
+
+确认执行期间若原区块被替换，节点对同一高度的新规范块达成一致，且账户状态允许重新调度，任务回到 `TRACKING / INCLUSION_REORGED`。临时读不到回执时继续保持确认中。
 
 ### 签名交易与节点请求
 
@@ -193,7 +225,7 @@ flowchart TD
 | BROADCASTING | 全部明确拒绝 | 可恢复错误回 QUEUED，记录退避或阻塞原因；提示 Nonce 过低则触发账户对账；永久原文错误记 REJECTED。 |
 | SUBMISSION_UNKNOWN | 查到 pending / 暂不可见且 Nonce 可用 | 前者转 PENDING；后者当前版本按策略回 BROADCASTING，旧版本保持观察。 |
 | PENDING | 仍未入块 | 保持 PENDING。可重播同一原文；费用不足时通知签名方提供 replacement。新一轮超时保留先前接收证据。 |
-| 任意仍可能入块的候选 | 本 Hash 入块 / 同任务其他 Hash 入块 / 外部消耗得到核实 | 分别落为 INCLUDED / REPLACED / REPLACED_EXTERNALLY。任务同时关闭。 |
+| 任意仍可能入块的候选 | 本 Hash 入块 / 同任务其他 Hash 入块 / 外部消耗得到核实 | 仅见入块时记 CONFIRMING。执行结果明确后分别记 INCLUDED 或 REPLACED，外部消耗核实后记 REPLACED_EXTERNALLY。 |
 | 任意仍在追踪的候选 | 任务到期 | 停止主动调度和监控，保留最后观测。 |
 
 每条节点请求从 IN_FLIGHT 转为 ACCEPTED、ALREADY_KNOWN、REJECTED 或 UNKNOWN。记录轮次、端点、供应商、时间、延迟、错误分类及脱敏原始错误。迟到响应只补充节点记录，已关闭任务保持原结果。
@@ -205,8 +237,8 @@ flowchart TD
 | 调用方 → 服务 | 接口与标识 | 职责 |
 |---|---|---|
 | 钱包 → Bundler | eth_supportedEntryPoints、eth_sendUserOperation；返回 userOpHash | 钱包选择该链上 Bundler 支持的 EntryPoint，提交签名的 UserOperation。Bundler 校验、模拟并打包。 |
-| Bundler → Broadcaster | POST /transactions，传外层 rawTransaction；返回 taskId、txHash | Bundler 可先查询**外层签名账户**的 Nonce，再签署调用 EntryPoint.handleOps 的交易。沿用同一套最多三家并发、自动重播、显式替换和入块即关闭规则。携带新 7702 授权的 bundle 使用 Type 4 并执行逐条授权诊断。 |
-| Bundler → Broadcaster | GET /transactions/{hash} 或入块通知 | Bundler 保存 userOpHash 到外层任务的关联，按 winningHash 定位实际入块版本。若发生替换或重新打包，以实际入块交易中可核实的操作为准。 |
+| Bundler → Broadcaster | POST /EVM/transactions，传外层 rawTransaction；返回 taskId、txHash | Bundler 可先查询**外层签名账户**的 Nonce，再签署调用 EntryPoint.handleOps 的交易。沿用同一套最多三家并发、自动重播、显式替换和核实执行结果后关闭的规则。携带新 7702 授权的 bundle 使用 Type 4 并执行逐条授权诊断。 |
+| Bundler → Broadcaster | GET /EVM/transactions/{hash} 或入块通知 | Bundler 保存 userOpHash 到外层任务的关联，按 winningHash 定位实际入块版本。若发生替换或重新打包，以实际入块交易中可核实的操作为准。 |
 | 钱包 → Bundler | eth_getUserOperationReceipt(userOpHash) | 按 EntryPoint 事件核实指定操作是否入块，通过单条操作回执的 success 报告执行结果。一个 bundle 内各操作可能有不同结果。 |
 
 在 ERC-4337 路径中，Bundler 自行选定外层发送账户的交易 Nonce；随包提供新 7702 授权时，授权账户的签名规则见下节。智能账户的 UserOperation Nonce 由对应 EntryPoint 按账户和 nonce key 管理，签名前可调用 EntryPoint.getNonce(sender, key)。外层交易 CLOSED / INCLUDED 后，Bundler 仍须按 userOpHash 核实每笔操作；外层回执成功不能证明每笔操作成功。[ERC-4337](https://eips.ethereum.org/EIPS/eip-4337) · [ERC-7769 Bundler RPC](https://eips.ethereum.org/EIPS/eip-7769)
@@ -225,7 +257,7 @@ flowchart TD
 **后续代付的调用顺序。**
 
 1. 代付服务查询 R 的账户 Nonce，并根据自己的在途交易选值。A 为本次操作签署 D 要求的指令。
-2. 代付服务构造并签署 R 的外层交易，保存业务请求与已签名原文、Hash 的关联，调用 POST /transactions。Broadcaster 在 R 的队列中按外层 Nonce 调度。
+2. 代付服务构造并签署 R 的外层交易，保存业务请求与已签名原文、Hash 的关联，调用 POST /EVM/transactions。Broadcaster 在 R 的队列中按外层 Nonce 调度。
 3. 提交响应超时则重交相同原文或查询原 Hash。另一笔付款误用相同 Nonce 时，普通提交返回 409；只有需要替换已接收任务时才提交同 Nonce 的签名替换版本。
 
 例如，代付签名方为 R 的两笔付款选定 `100` 和 `101`。如果两笔都属于 A，而 D 对 A 采用顺序操作编号，签名流程还要分别协调 `7` 和 `8`，并保持执行顺序。A 用外部钱包普通转账只会推进 A 的链上账户 Nonce；已签操作仍可能因余额变化而执行失败。实际操作编号与签名字段以所部署的 D 为准。[EIP-7702 授权处理](https://eips.ethereum.org/EIPS/eip-7702#behavior) · [委托持久性](https://eips.ethereum.org/EIPS/eip-7702#persistence-of-code-delegation) · [签名与防重放](https://eips.ethereum.org/EIPS/eip-7702#security-considerations)
@@ -257,9 +289,9 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 | READY | 交易已全签并持久化，blockhash 仍有效 | 立即进入 BROADCASTING。对最多三家独立供应商并发调用 sendTransaction，发送相同的 base64 原文。两家或一家可用就立即发；零家可用时保持 READY 并继续监测有效期。 |
 | BROADCASTING | 一家返回与本地一致的 signature | 进入 TRACKING，收集其他在途响应。RPC 接收只证明已提交；按 signature 查链上结果。 |
 | BROADCASTING / TRACKING | 超时、断连、单节点报 BlockhashNotFound，或只观察到 processed | 继续按原 signature 核查。有效期内按需重播相同字节；拒绝原因按交易或端点归类。单个落后节点的响应不能触发重签。 |
-| 任意未结束状态 | 核实原 signature 在该集群达到 confirmed 或 finalized | 以 INCLUDED 关闭，保存实际 signature 和 slot。按 err 是否为空分别返回 SUCCESS 或 FAILED；执行失败也属于已入块，停止重播及过期重签。 |
+| 任意未结束状态 | 核实原 signature 在该集群达到 confirmed 或 finalized | 保存 signature 和 slot。err 为 null 表示成功，有错误值则报告失败及原生 err。缺少该字段时进入 CONFIRMING 并查执行元数据。停止重播及过期重签。 |
 | READY / BROADCASTING / TRACKING | 同集群健康节点的 getBlockHeight 已**严格大于**该 blockhash 的 lastValidBlockHeight | 进入 CHECKING_EXPIRY，停止重播旧原文，核查旧签名是否已在有效期内入块。比较的是 block height；context.slot 只用于约束 RPC 数据新鲜度。 |
-| CHECKING_EXPIRY | 历史记录查到旧签名已入块 / 结果有分歧或历史覆盖不足 | 已入块按 INCLUDED 关闭；证据不足保持核查，可见 processed 时继续追踪其归属。单次查无记录或墙钟超时均不足以要求重新付款。 |
+| CHECKING_EXPIRY | 历史记录查到旧签名已入块 / 结果有分歧或历史覆盖不足 | 查到入块但缺少执行结果时进入 CONFIRMING，取得结果后按 INCLUDED 关闭；证据不足保持核查，可见 processed 时继续追踪其归属。单次查无记录或墙钟超时均不足以要求重新付款。 |
 | CHECKING_EXPIRY | 已核实旧 blockhash 失效，且有覆盖有效窗口的规范链历史证据表明旧签名未入块 | 置 RESIGN_REQUIRED，通过 outbox 向上游发送 solana.resign_required，附 taskId、paymentId、旧 signature 和过期依据。 |
 | RESIGN_REQUIRED | 上游获取新 recent blockhash，用户与 GM 对更新后的同一 message 全部重新签名，并调用 resign | 新版本从 READY 开始，产生新的 signature，复用原 taskId 和 paymentId。等签名期间不发起广播。 |
 
@@ -282,7 +314,7 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 
 接收事务写入任务、签名原文和调度信息后再响应。工作实例以租约领取到期任务；重启后接手失效租约，先核查全部候选 Hash，再决定按入块关闭、等待或重播。实际 RPC 调用允许重复，数据库对任务、候选和事件去重。SQLite 保留恢复所需的原文、状态与证据。
 
-状态变更和待发事件通过同一事务写入 outbox。消息队列或 Webhook 至少一次投递，失败可重试，消费方按 eventId 去重并按任务版本处理乱序。transaction.submitted 表示已持久化，入块时 transaction.included 和 transaction.closed 携带入块证据及独立执行状态，其他终止路径的 closed 携带对应原因，transaction.replacement_required 通知签名方加价。任务被外部覆盖时发送 transaction.nonce_conflict 及 transaction.closed，携带 taskId、本地 Hash、链、账户、Nonce、consumingHash、区块和错误码。鉴权按接收方隔离。通知投递失败只重试通知。
+状态变更和待发事件通过同一事务写入 outbox。消息队列或 Webhook 至少一次投递，失败可重试，消费方按 eventId 去重并按任务版本处理乱序。transaction.submitted 表示已持久化，transaction.included 通知已观察到入块，取得执行结果后 transaction.closed 通知任务结束，其他终止路径的 closed 携带对应原因，transaction.replacement_required 通知签名方加价。任务被外部覆盖时发送 transaction.nonce_conflict 及 transaction.closed，携带 taskId、本地 Hash、链、账户、Nonce、consumingHash、区块和错误码。鉴权按接收方隔离。通知投递失败只重试通知。
 
 ## 首版验收示例
 
@@ -324,4 +356,4 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 
 例如，Sui 请求体形如 `{"rawTransaction":"<base64 TransactionData>","signatures":["<base64 UserSignature>"]}`。另外四条链只传 `rawTransaction`。签名服务负责 Bitcoin 的输入选择、TRON 的交易有效期、Aptos 的账户序号、Sui 的对象引用以及 TON 钱包的重放保护。
 
-原生链任务从 `QUEUED` 开始调度。提交给节点后进入 `TRACKING`，复用三供应商策略、SQLite 重启恢复和 Webhook。读取不完整或节点对入块位置、执行结果存在分歧时继续核查。证据一致时进入 `CLOSED / INCLUDED`，单独记录执行成功或失败。超过 `trackingHours` 仍无足够证据则以 `CLOSED / EXPIRED` 结束本地跟踪；需要重付时先核对原交易的链上结果。
+原生链任务从 `QUEUED` 开始调度。提交给节点后进入 `TRACKING`，复用三供应商策略、SQLite 重启恢复和 Webhook。读取不完整或节点对入块位置、执行结果存在分歧时继续核查。已核实入块但仍缺执行元数据时进入 `CONFIRMING / PENDING`。入块证据及执行结果一致时进入 `CLOSED / INCLUDED`，单独记录执行成功或失败。超过 `trackingHours` 仍未核实入块则以 `CLOSED / EXPIRED` 结束本地跟踪；需要重付时先核对原交易的链上结果。

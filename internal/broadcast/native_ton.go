@@ -80,7 +80,18 @@ func (tonAdapter) lookup(ctx context.Context, s *Service, p Endpoint, hash strin
 				Shard     string
 				Workchain *int
 			} `json:"block_ref"`
-			Description struct{ Aborted *bool }
+			Description struct {
+				Aborted *bool
+				Compute struct {
+					ExitCode   *int `json:"exit_code"`
+					Success    *bool
+					SkipReason string `json:"reason"`
+				} `json:"compute_ph"`
+				Action struct {
+					ResultCode *int `json:"result_code"`
+					Success    *bool
+				} `json:"action"`
+			}
 		} `json:"transactions"`
 	}
 	q := url.Values{"msg_hash": {hash}, "direction": {"in"}, "limit": {"100"}}
@@ -96,10 +107,30 @@ func (tonAdapter) lookup(ctx context.Context, s *Service, p Endpoint, hash strin
 		if err != nil || hex.EncodeToString(norm) != hash {
 			continue
 		}
-		if tx.Hash == "" || tx.Account == "" || tx.Lt == "" || tx.Block.Seqno == nil || tx.Block.Workchain == nil || tx.Block.Shard == "" || tx.Description.Aborted == nil {
+		if tx.Hash == "" || tx.Account == "" || tx.Lt == "" || tx.Block.Seqno == nil || tx.Block.Workchain == nil || tx.Block.Shard == "" {
 			return update{}, errNativeEvidence
 		}
-		return nativeIncluded(hash, !*tx.Description.Aborted, map[string]any{"transactionHash": tx.Hash, "account": tx.Account, "lt": tx.Lt, "seqno": *tx.Block.Seqno, "workchain": *tx.Block.Workchain, "shard": tx.Block.Shard}), nil
+		proof := map[string]any{"transactionHash": tx.Hash, "account": tx.Account, "lt": tx.Lt, "seqno": *tx.Block.Seqno, "workchain": *tx.Block.Workchain, "shard": tx.Block.Shard}
+		d := tx.Description
+		if d.Aborted == nil {
+			return included(hash, "PENDING", proof), nil
+		}
+		reason := "TON_TRANSACTION_ABORTED"
+		if *d.Aborted {
+			switch {
+			case d.Compute.Success != nil && !*d.Compute.Success && d.Compute.ExitCode != nil:
+				reason, proof["executionDetail"] = "TON_COMPUTE_FAILED", *d.Compute.ExitCode
+			case d.Compute.SkipReason != "":
+				reason, proof["executionDetail"] = "TON_COMPUTE_SKIPPED", limitedDetail(d.Compute.SkipReason)
+			case d.Action.Success != nil && !*d.Action.Success && d.Action.ResultCode != nil:
+				reason, proof["executionDetail"] = "TON_ACTION_FAILED", *d.Action.ResultCode
+			}
+		}
+		u := nativeIncluded(hash, !*d.Aborted, proof)
+		if *d.Aborted {
+			u.reason = reason
+		}
+		return u, nil
 	}
 	return nativeTracking(), nil
 }
