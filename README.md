@@ -1,10 +1,10 @@
 # Broadcaster
 
-GM Wallet 的多链 EVM 已签名交易广播与生命周期管理服务。调用方提交一次，服务负责持久化、按账户 Nonce 调度、向最多三家独立付费 RPC 供应商并发广播、核实链上结果并通知上游。本文是首版开发契约。仓库当前处于设计阶段。
+GM Wallet 的 EVM 与 Solana 已签名交易广播服务。调用方提交签名原文，服务持久化后向最多三家独立付费 RPC 供应商并发广播，并跟踪入块结果。EVM 按外层账户 Nonce 调度；Solana 代付交易在用户和 GM 签齐后立即调度，按交易签名及 recent blockhash 的有效期跟踪。本文是首版开发契约。仓库当前处于设计阶段。
 
-签名方自行查询和选取 Nonce、构造交易并签名，也负责签署加价替换版本。Broadcaster 从已签名原文恢复外层发送地址和 Nonce，按账户调度已接收任务。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
+在 EVM 上，签名方自行查询和选取 Nonce、构造交易并签名，也负责签署加价替换版本。Broadcaster 从已签名原文恢复外层发送地址和 Nonce，按账户调度已接收任务。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
 
-## 调用方接口
+## EVM 调用方接口
 
 交易提交和管理操作需要鉴权，查询和变更限定在调用方有权访问的任务或账户内。POST 和 PATCH 的请求体使用 JSON。下表中的 rawTransaction 是完整的十六进制已签名原文。Hash 路径支持用 chainId 查询参数限定网络；出现跨链歧义时必须指定链。
 
@@ -27,7 +27,7 @@ GM Wallet 的多链 EVM 已签名交易广播与生命周期管理服务。调�
 
 202 表示服务已持久化任务。调用方可用返回的 Hash 查询进度；自动重播、查回执和故障恢复无需调用 retry 接口。
 
-## Nonce 查询与任务排序
+## EVM Nonce 查询与任务排序
 
 签名服务可以直接向自己的 RPC 查询，也可以调用 Broadcaster 的只读接口。两者使用相同的 RPC 方法。例如，GET /accounts/{R}/nonce?chainId=1 对应 eth_getTransactionCount(R, "latest")，返回最近区块状态中的账户 Nonce。选择 pending 时返回该节点考虑本地 pending 交易后的视图，各供应商可能不同。每次查询均读 RPC，不叠加本地排队任务，不产生预留或写入账户计数器。[Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/#eth_gettransactioncount)
 
@@ -48,7 +48,7 @@ flowchart TD
 
 ## 付费 RPC 节点管理
 
-每个端点归属于一个稳定的 providerId 和一条链。同一供应商的多个域名、密钥或端点只占一路。每条接入链使用同一个自购节点池，**所有入池端点必须能广播普通 EVM 交易、EIP-7702 Type 4 交易，以及 ERC-4337 Bundler 签好的外层交易**。4337 外层交易调用目标链的 EntryPoint 合约，经 eth_sendRawTransaction 提交。面向钱包的 eth_sendUserOperation 由独立 Bundler 提供。
+每个端点归属于一个稳定的 providerId 和一条链。同一供应商的多个域名、密钥或端点只占一路。每个 EVM 网络使用自己的自购节点池，**该池所有端点必须能广播普通 EVM 交易、EIP-7702 Type 4 交易，以及 ERC-4337 Bundler 签好的外层交易**。4337 外层交易调用目标链的 EntryPoint 合约，经 eth_sendRawTransaction 提交。面向钱包的 eth_sendUserOperation 由独立 Bundler 提供。
 
 | 方法与路径 | 行为 |
 |---|---|
@@ -58,13 +58,15 @@ flowchart TD
 
 准入须有目标端点和对应凭证的能力证据。例如可使用运维提供的受控已签名测试交易，验证对应写接口接受该类型；费用及链上副作用须在准入测试安排中明确。对 4337，按目标链登记 Bundler 使用的 EntryPoint 地址和版本，核对合约部署，并验证执行端点允许发送有效的、调用该 EntryPoint 的已签名 bundle。查高度成功、能读取历史 Type 4 交易或收到通用参数错误，均不足以证明该端点有 Type 4 广播权限。
 
+Solana 按集群单独建池。准入时用 getGenesisHash 核对集群，验证凭证、sendTransaction 写权限以及交易状态、历史和区块高度查询能力。以 getBlockHeight 和节点进度做读侧健康检查。EVM 和 Solana 共用下述供应商去重、广播熔断、半开试发及恢复规则。
+
 ### 每轮选点
 
 按链筛选已启用、高度检查可用且广播未冷却的供应商。每家选一个端点，同轮立即发送同一份签名原文。三家或以上发三家，两家发两家，一家即发一家。零家可用时保留调度请求，记录 NO_AVAILABLE_PROVIDER，最早可试发的端点恢复时唤醒。已广播的候选继续监控。第一家接收后，其他已发出的请求照常收集结果。
 
 ### 高度检查、广播熔断与恢复
 
-使用 eth_blockNumber 记录端点延迟、最后高度和最近推进时间，并对比同链独立供应商。单次高度持平是正常现象；持续落后或停止推进按链的出块节奏判定。只有一家时参考该端点自身近期推进情况。高度检查和广播各自记录健康状态，高度探测成功只能恢复读侧健康。[eth_blockNumber](https://eips.ethereum.org/EIPS/eip-1474#eth_blocknumber)
+EVM 使用 eth_blockNumber 记录端点延迟、最后高度和最近推进时间，并对比同链独立供应商。单次高度持平是正常现象；持续落后或停止推进按链的出块节奏判定。只有一家时参考该端点自身近期推进情况。高度检查和广播各自记录健康状态，高度探测成功只能恢复读侧健康。[eth_blockNumber](https://eips.ethereum.org/EIPS/eip-1474#eth_blocknumber)
 
 下表是**每条链、每个端点的广播熔断器**。冷却阶梯为 3、6、10、15、21、28、36、45、55、60 分钟，之后保持 60 分钟。每档都需要三次端点故障；首次 3 分钟是 Broadcaster 的约定。阶梯后段及上限依据 [ChainScanner 的计数实现](https://github.com/GMWalletApp/ChainScanner/blob/87d802f3daa946e265ed8e396378fb13884a5eee/internal/nodes/source_pool.go#L57-L72)。
 
@@ -79,7 +81,7 @@ flowchart TD
 
 计数、档位、截止时间及半开试发租约需跨实例共享，按端点原子更新。三家并发各计各的。一家返回预期 Hash，另一家返回 already known，第三家超时，本轮交易即可进入 PENDING，只有第三家增加一次故障。already known 表示该节点已知这笔交易。[Geth 交易池错误定义](https://github.com/ethereum/go-ethereum/blob/master/core/txpool/errors.go)
 
-## 交易生命周期
+## EVM 交易生命周期
 
 **结束条件是候选 Hash 已出现在观测时的规范区块中。** 保存交易 Hash、区块号、区块 Hash、交易索引和观测时间。可通过区块交易列表或与规范区块核对过的回执建立入块证据；只有 RPC 接收或 pending 交易对象时继续跟踪。入块即结束广播任务，关闭后不追踪区块重组，也不承诺链级最终性。
 
@@ -172,6 +174,35 @@ flowchart TD
 2. **执行时**分别报告 RPC 广播、外层回执和每条授权结果。使用交易在区块中的实际位置重放或等价证据，才能确定该条 APPLIED 或 SKIPPED 及原因。只有预检、标准回执或区块末账户代码时，对无法证明的条目返回 UNKNOWN，并保留预测及证据来源。
 3. **记录结果时**绑定观测到的区块 Hash。外层 status=1 时部分授权仍可能被跳过；外层执行回退时已应用的委托仍可保留。[EIP-7702 协议](https://eips.ethereum.org/EIPS/eip-7702#behavior)
 
+## Solana 代付交易
+
+GM 的代付地址是 fee payer，用户授权转账。上游先确定集群、付款指令、代付地址和 recent blockhash，用户与 GM 的签名服务对**同一份 message** 签名，再提交完整序列化交易。Broadcaster 验证签名并广播。第一份签名属于 fee payer，也是 RPC 查询所用的交易 ID（下文记为 signature）。同一 GM 地址可同时代付多笔交易，各笔独立调度，提交顺序不保证链上执行顺序。本节适用于使用 recent blockhash 的交易；durable nonce 交易不适用这套过期规则。[Solana 交易结构](https://solana.com/docs/core/transactions/transaction-structure)
+
+### 提交与幂等
+
+| 方法与路径 | 输入 | 行为 |
+|---|---|---|
+| POST /solana/transactions | cluster、paymentId、signedTransaction（base64）、本次 getLatestBlockhash 返回的 context.slot 和 lastValidBlockHeight | 解析 message 中的 recentBlockhash，校验适用的交易格式、GM fee payer、用户及全部必需签名。缺签、签名无效或采用 durable nonce 时返回具体 4xx 原因；成功持久化返回 202、taskId 和 signature，直接进入待广播状态。 |
+| GET /solana/transactions/{signature}?cluster=… | 任一版本的第一份签名 | 返回同一支付任务、各版本签名和状态、blockhash、有效高度、逐供应商结果、入块 slot 和执行错误（如有）。 |
+| POST /solana/transactions/{signature}/resign | cluster、重新双签的完整原文和新 blockhash 的上下文及有效高度 | 仅当所指旧版本为任务当前版本且已进入 RESIGN_REQUIRED 时接收。核对同一付款、代付地址及指令与原版本一致，只更新 blockhash 和签名；在同一事务中登记新版本并调度。过时版本或旧交易结果待核实返回 409。 |
+
+paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、集群和 paymentId 唯一创建任务，按集群和 signature 去重。重交已登记的相同签名返回 200 及原任务；同一付款经普通入口提交另一份交易返回 409。重新签名接口重试已登记版本也幂等。恢复时保留所有版本，以旧 signature 查询仍能看到最终结果。
+
+### 广播、过期与重新签名
+
+| 当前状态 | 依据 | 下一步 |
+|---|---|---|
+| READY | 交易已全签并持久化，blockhash 仍有效 | 立即进入 BROADCASTING。对最多三家独立付费供应商并发调用 sendTransaction，发送相同的 base64 原文。两家或一家可用就立即发；零家可用时保持 READY 并继续监测有效期。 |
+| BROADCASTING | 一家返回与本地一致的 signature | 进入 TRACKING，收集其他在途响应。RPC 接收只证明已提交；按 signature 查链上结果。 |
+| BROADCASTING / TRACKING | 超时、断连、单节点报 BlockhashNotFound，或只观察到 processed | 继续按原 signature 核查。有效期内按需重播相同字节；拒绝原因按交易或端点归类。单个落后节点的响应不能触发重签。 |
+| 任意未结束状态 | 核实原 signature 在该集群达到 confirmed 或 finalized | 以 INCLUDED 关闭，保存实际 signature 和 slot。按 err 是否为空分别返回 SUCCESS 或 FAILED；执行失败也属于已入块，停止重播及过期重签。 |
+| READY / BROADCASTING / TRACKING | 同集群健康节点的 getBlockHeight 已**严格大于**该 blockhash 的 lastValidBlockHeight | 进入 CHECKING_EXPIRY，停止重播旧原文，核查旧签名是否已在有效期内入块。比较的是 block height；context.slot 只用于约束 RPC 数据新鲜度。 |
+| CHECKING_EXPIRY | 历史记录查到旧签名已入块 / 结果有分歧或历史覆盖不足 | 已入块按 INCLUDED 关闭；证据不足保持核查，可见 processed 时继续追踪其归属。单次查无记录或墙钟超时均不足以要求重新付款。 |
+| CHECKING_EXPIRY | 已核实旧 blockhash 失效，且有覆盖有效窗口的规范链历史证据表明旧签名未入块 | 置 RESIGN_REQUIRED，通过 outbox 向上游发送 solana.resign_required，附 taskId、paymentId、旧 signature 和过期依据。 |
+| RESIGN_REQUIRED | 上游获取新 recent blockhash，用户与 GM 对更新后的同一 message 全部重新签名，并调用 resign | 新版本从 READY 开始，产生新的 signature，复用原 taskId 和 paymentId。等签名期间不发起广播。 |
+
+签名方使用 getLatestBlockhash 一次取得 blockhash 及其 lastValidBlockHeight，建议使用 confirmed，广播预检采用一致的 commitment，并传 minContextSlot 避免落后节点误判。有效高度是签名原文之外的元数据；应核对消息中的 hash 与上游取得的配对记录。授权重签前，用健康节点核实同一旧 hash 在 finalized 视图中已失效、该视图已越过有效高度，再用 getSignatureStatuses（searchTransactionHistory=true）及具备历史覆盖的节点核查旧签名。无法确认旧交易结果时继续查询并对外报告原因。进程重启或通知重投都沿用已持久化的支付任务和签名版本。[获取 blockhash](https://solana.com/docs/rpc/http/getlatestblockhash) · [发送交易](https://solana.com/docs/rpc/http/sendtransaction) · [查询签名](https://solana.com/docs/rpc/http/getsignaturestatuses) · [交易确认与过期](https://solana.com/docs/advanced/confirmation)
+
 ## 故障恢复与上游事件
 
 接收事务写入任务、签名原文和调度信息后再响应。工作实例以租约领取到期任务；重启后接手失效租约，先核查全部候选 Hash，再决定按入块关闭、等待或重播。实际 RPC 调用允许重复，数据库对任务、候选和事件去重。Redis 可用于加速，PostgreSQL 保留恢复所需的原文、状态与证据。
@@ -194,3 +225,6 @@ flowchart TD
 | 首次代付前，A 在外部钱包先花掉授权 Nonce | 标记 A 的授权需核查或重签；已经发出的 R 交易仍按外层 Hash 独立跟踪。 |
 | 同一 R 并发代付两笔，第一笔提交响应超时 | 两笔使用不同的 R 账户 Nonce；重试第一笔复用其原文和 Hash。若同属 A 且 D 采用顺序操作 Nonce，还需验证两份指令各有独立、顺序可执行的编号。 |
 | 代付地址 R 的 RPC latest 返回 20，本地队列已有尚未广播的 20 | 查询仍返回 20。另一个 Hash 普通提交同一个 20 时返回 409；查询和冲突均不改变任何账户计数器。 |
+| Solana 同一 GM fee payer 同时代付两笔已全签交易，其中一笔三家发送均超时 | 两笔独立调度。超时的交易按本地第一份签名查链；有效期内重播相同字节。 |
+| Solana 旧 blockhash 已过期，历史查询随后查到原签名已入块 | 关闭原任务并返回执行结果，即使支付服务重试也不触发重签。 |
+| Solana 旧签名确认未入块且 blockhash 已失效，上游只提供新的 GM 签名 | 缺用户的新签名时拒绝；双方对新消息签齐后才登记新版本。重复提交同一新签名只产生一个版本。 |
