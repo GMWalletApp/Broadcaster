@@ -4,12 +4,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	sol "github.com/gagliardetto/solana-go"
@@ -106,60 +103,6 @@ func TestSolanaSignedBytesAndConfirmedExecutionError(t *testing.T) {
 	}
 	if status, _ := request(s, "POST", "/solana/transactions/"+hash+"/resign", "test-token", solRequest(keys, sol.Hash{55})); status != 409 {
 		t.Fatal(status)
-	}
-}
-
-func TestScannerActivityOnlyWakesMatchingTask(t *testing.T) {
-	s := service(t, filepath.Join(t.TempDir(), "db"))
-	task, v, e := decodeEVM(rawEVM(must(crypto.GenerateKey()), 0, 1))
-	if e != nil {
-		t.Fatal(e)
-	}
-	task.Owner = "merchant"
-	task, _, e = s.Store.submit(t.Context(), task, v)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = s.Store.db.Exec("UPDATE tasks SET due=?", time.Now().Add(time.Hour).UnixMilli()); e != nil {
-		t.Fatal(e)
-	}
-	var acked atomic.Bool
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer scanner-token" {
-			t.Error("wrong scanner consumer")
-		}
-		switch r.URL.Path {
-		case "/v1/subscriptions":
-			var watches []map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&watches)
-			if len(watches) != 1 || watches[0]["address"] != task.Sender || watches[0]["network"] != "eth" {
-				t.Error(watches)
-			}
-		case "/v1/events/next":
-			writeJSON(w, 200, map[string]any{"id": 17, "activity": map[string]any{"network": "eth", "addresses": []string{task.Sender}}})
-		case "/v1/events/17/ack":
-			var due int64
-			if e := s.Store.db.QueryRow("SELECT due FROM tasks WHERE id=?", task.ID).Scan(&due); e != nil || due != 0 {
-				t.Error("ack before commit")
-			}
-			acked.Store(true)
-			w.WriteHeader(204)
-		default:
-			t.Error("unexpected path", r.URL.Path)
-		}
-	}))
-	defer mock.Close()
-	s.cfg.Scanner = &ScannerConfig{URL: mock.URL, Token: "scanner-token", Networks: map[string]string{"1": "eth"}}
-	if e = s.syncWatches(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	ok, e := s.nextActivity(t.Context(), "1", "eth")
-	if !ok || e != nil || !acked.Load() {
-		t.Fatal(ok, e)
-	}
-	got := must(s.Store.lookup(t.Context(), "merchant", EVM, "1", v.Hash))
-	if got.State != "QUEUED" || got.Winner != "" {
-		t.Fatal("scanner event was treated as proof", got)
 	}
 }
 

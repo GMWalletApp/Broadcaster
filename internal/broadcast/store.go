@@ -48,7 +48,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(8)
 	st := &Store{db}
-	e = st.atomic(ctx, func(tx *sql.Tx) error { _, e := tx.ExecContext(ctx, schema); return e })
+	e = st.initialize(ctx)
 	if e != nil {
 		db.Close()
 		return nil, e
@@ -192,11 +192,48 @@ func insertVersion(ctx context.Context, tx *sql.Tx, t Task, v Version) error {
 	return e
 }
 
+// Check hash idempotency and active occupancy before doing any RPC preflight.
+func (s *Store) submittedEVM(ctx context.Context, incoming Task, hash string) (Task, error) {
+	var known Task
+	err := s.transaction(ctx, true, func(tx *sql.Tx) error {
+		var err error
+		known, err = find(ctx, tx, incoming.Owner, EVM, incoming.Network, hash)
+		if err != notFound {
+			return err
+		}
+		var id, owner string
+		err = tx.QueryRowContext(ctx, `SELECT id,owner_id FROM tasks WHERE family='evm' AND state<>'CLOSED'
+			AND network=? AND sender=? AND nonce=?`, incoming.Network, incoming.Sender, incoming.Nonce).Scan(&id, &owner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return notFound
+		}
+		if err != nil {
+			return err
+		}
+		if owner != incoming.Owner {
+			id = ""
+		}
+		return &Fault{409, "NONCE_CONFLICT", id}
+	})
+	return known, err
+}
+
 // submit serializes only competing inserts through unique constraints. A losing
 // writer re-reads the winner after ON CONFLICT, inside the same immediate transaction.
 func (s *Store) submit(ctx context.Context, t Task, v Version) (Task, bool, error) {
 	created := false
 	e := s.atomic(ctx, func(tx *sql.Tx) error {
+		// A closed task frees the queue slot but keeps ownership of all its hashes.
+		if t.Family == EVM {
+			known, err := find(ctx, tx, t.Owner, EVM, t.Network, v.Hash)
+			if err == nil {
+				t = known
+				return nil
+			}
+			if err != notFound {
+				return err
+			}
+		}
 		t.ID = id()
 		t.Active = v.Hash
 		t.Revision = 1

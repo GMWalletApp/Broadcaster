@@ -23,7 +23,7 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 
 **节点准入。** 管理员向 POST /rpc-providers 提交 network（或 chainId）、providerId、url、可选 bearer。在 EVM 网络附 evmProbes（受控的已签名交易数组），覆盖普通交易、Type 4，以及配置的每个 EntryPoint 的 bundle。Solana 网络附 solanaProbe，结构同 Solana 提交请求。准入会真实发送这些原文，使用专用探测账户和已批准的测试操作。添加成功后响应中的 id 用于 PATCH；仅修改 enabled 无须重新发送探测交易。
 
-**事件和 Scanner。** 在 clients 的相应条目配置 webhook（HTTPS）和 webhookSecret 可启用异步通知，密钥支持环境变量。请求体包含 eventId、event、version、data。接收方使用原始请求体和共享密钥计算 HMAC-SHA256，与 X-Broadcaster-Signature 的十六进制值核对，以 eventId 去重。配置可选 scanner 对象（url、token、networks，例如 {"1":"ethereum"}）可按待处理 EVM 任务维护地址订阅。使用专用消费者令牌，地址活动仅唤醒任务，随后仍由已准入 RPC 核实。
+**事件通知。** 在 clients 的相应条目配置 webhook（HTTPS）和 webhookSecret 可启用异步通知，密钥支持环境变量。请求体包含 eventId、event、version、data。接收方使用原始请求体和共享密钥计算 HMAC-SHA256，与 X-Broadcaster-Signature 的十六进制值核对，以 eventId 去重。
 
 **实现范围。** EVM 解析受链 ID 保护的 legacy、Type 1、2、4。ERC-4337 支持 Bundler 签好的外层交易。Solana 接收 legacy 和 v0 完整签名交易。7702 逐项确证需要节点的交易前状态跟踪能力；提供方无此能力时保留 UNKNOWN。Solana 历史不完整时保持 CHECKING_EXPIRY，服务不会自行签名。
 
@@ -33,14 +33,14 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 
 | 方法与路径 | 输入 | 响应与副作用 |
 |---|---|---|
-| POST /transactions | rawTransaction | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由不同 Hash 登记时返回 409 NONCE_CONFLICT。 |
+| POST /transactions | rawTransaction | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由其他活动任务占用时返回 409 NONCE_CONFLICT。 |
 | GET /transactions/{hash} | 原始或替换 Hash | 返回 200，包含任务阶段和结果、所查 Hash 的状态、当前调度版本、全部候选、各轮各节点结果、链上证据及 7702 诊断。未知或不可见的 Hash 返回 404。 |
 | POST /transactions/{hash}/force | reason | 对当前可调度版本立即安排一轮广播，记录操作者、时间和原因，返回 202。只跳过本地 Nonce 排序，仍受节点冷却、可用性及链上状态约束。同一轮已排队或在途时复用该轮。 |
 | POST /transactions/{hash}/replacement | rawTransaction | 用路径指定待替换的当前版本。新签名交易通过校验，且 chainId、sender、nonce 相同后，在原任务下登记新 Hash，返回 202。重复提交同一已登记替换版本返回 200。原 Hash 继续接受链上监控。 |
 | GET /accounts/{address}/queue?chainId=… | 地址、目标链 | 按外层 Nonce 升序返回未关闭任务、当前版本、排队原因和下次调度时间。队列只列已接收的任务。 |
-| GET /accounts/{address}/nonce?chainId=… | 地址、目标链，可选 blockTag（latest 或 pending） | 直接向该链健康 RPC 调用 eth_getTransactionCount。默认 latest；200 返回 chainId、address、blockTag、nonce（十进制字符串）。RPC 均不可用时返回 503 NONCE_VIEW_UNAVAILABLE。 |
+| GET /accounts/{address}/nonce?chainId=… | 地址、目标链，可选 blockTag（latest 或 pending） | 返回最新链上 chainNonce 及结合队列的推荐 nonce。指定 pending 时还返回同一节点的 pendingNonce。均为十进制字符串。所有节点读取失败返回 503 NONCE_VIEW_UNAVAILABLE。 |
 
-**冲突与错误。** 原文无法解码、签名无效、链未启用或整笔交易违反协议规则时，提交返回 4xx 和具体原因，校验失败的请求不占用 Nonce。已有 Hash 的幂等查询优先于依赖当前链状态的预检，先校验调用方访问权限。任务表唯一键为 (chainId, sender, nonce)，签名交易以 (chainId, txHash) 去重。Hash 幂等检查与新任务插入在同一事务内完成，唯一键冲突时重新读取已提交的任务作判定。并发 replacement 使用当前版本的条件更新；对过时版本提交不同的新 Hash、在核查 Nonce 消耗者或已关闭时尝试替换，以及对不可调度版本执行 force，均返回 409 和原因。已关闭任务保留提交历史及终止结果。
+**冲突与错误。** 原文无法解码、签名无效、链未启用或整笔交易违反协议规则时，提交返回 4xx 和具体原因，校验失败的请求不占用 Nonce。已有 Hash 的幂等查询优先于依赖当前链状态的预检，先校验调用方访问权限。活动 EVM 任务的唯一键为 (chainId, sender, nonce)，签名交易以 (chainId, txHash) 去重。Hash 幂等检查与新任务插入在同一事务内完成，唯一键冲突时重新读取已提交的任务作判定。并发 replacement 使用当前版本的条件更新；对过时版本提交不同的新 Hash、在核查 Nonce 消耗者或已关闭时尝试替换，以及对不可调度版本执行 force，均返回 409 和原因。已关闭任务保留提交历史及终止结果。
 
 **提交响应示例**（标识符省略中间字符）：
 
@@ -52,22 +52,25 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 
 ## EVM Nonce 查询与任务排序
 
-签名服务可以直接向自己的 RPC 查询，也可以调用 Broadcaster 的只读接口。两者使用相同的 RPC 方法。例如，GET /accounts/{R}/nonce?chainId=1 对应 eth_getTransactionCount(R, "latest")，返回最近区块状态中的账户 Nonce。选择 pending 时返回该节点考虑本地 pending 交易后的视图，各供应商可能不同。每次查询均读 RPC，不叠加本地排队任务，不产生预留或写入账户计数器。[Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/#eth_gettransactioncount)
+每次 `GET /accounts/{address}/nonce?chainId=…` 随机选择一个健康 RPC 读取 `eth_getTransactionCount(address,"latest")`，失败后换下一家。接口从链上值开始，跳过同链同发送方所有调用方的连续活动任务，返回第一个空位。可选 `blockTag=pending` 会在同一节点再读取 pending，从两者较大值开始。只有 latest 能触发已占用 Nonce 的链上核查。[Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/#eth_gettransactioncount)
+
+例如链上返回 20，本地活动任务占用 20、21、23，默认响应含 `"chainNonce":"20","nonce":"22"`。签名交易成功入队时才占用槽位；查询本身不预留，也不保存链上读数或推荐值。7702 代付时对代付地址调用此接口，为外层签名选择 Nonce；用户授权使用用户自己的账户 Nonce。
 
 ~~~mermaid
 flowchart TD
-    Read["签名方查自己的 RPC 或 GET nonce"] --> Sign["选取外层发送账户的 Nonce，签名"]
+    Read["GET nonce：随机 RPC 查 latest，再查活动队列"] --> Sign["选取外层发送账户的 Nonce，签名"]
     Sign --> Submit["POST /transactions：原子登记任务"]
     Submit -->|相同 Hash| Existing["返回已有任务"]
     Submit -->|不同 Hash 且任务键冲突| Conflict["409 NONCE_CONFLICT，本次提交不入队"]
     Submit -->|新任务| Queue["按链、外层发送方和 Nonce 排队"]
+    Conflict -->|独立付款| Read
     Conflict -->|确需替换原任务| Replace["有权限的调用方显式提交 replacement"]
     Replace --> Queue
 ~~~
 
-数据库保存签名原文及任务键 (chainId, sender, nonce)，用于并发判重、排序和重启恢复。账户的实时 Nonce 始终通过 RPC 读取。两个服务可同时查到 20，也可能在本地任务尚未传播时都从 pending 读到 20。不同交易使用同一个 20 时只有一个普通提交能创建任务。另一笔若是独立付款，由签名方核对在途交易和队列，另选可用值重新签名；只有同一任务的有意替换才用 replacement。
+数据库保存签名原文及任务键 (chainId, sender, nonce)，用于并发判重、排序和重启恢复。若两个服务都在第一笔交易入队前查询，它们可能拿到同一个推荐值。不同交易使用同一槽位时，只有一次普通提交能创建任务。另一笔若是独立付款，由签名方再次查询推荐值后重新签名。只有同一任务的有意替换才用 replacement。
 
-发现外层账户的链上 Nonce 已越过本地任务时，逐笔核查候选 Hash。自己的版本入块则正常关闭；证实外部消耗则通知原提交方并重新调度剩余任务；证据不足则暂停该任务重播并继续核查。新区块、ChainScanner 地址活动或节点返回 nonce too low 均可触发核查。查询接口始终可独立从 RPC 读取，无需等待扫描进度。
+发现外层账户的链上 Nonce 已越过本地任务时，逐笔核查候选 Hash。自己的版本入块则正常关闭；证实外部消耗则通知原提交方并重新调度剩余任务；证据不足则暂停该任务重播并继续核查。查询发现低于 latest 的排队或跟踪任务，会在同一数据库事务内转入 RESOLVING_NONCE 并唤醒工作实例。工作实例核实结果后通知上游。已关闭任务保留 Hash 历史；若链上槽位仍可用，它可以被新任务使用。过期任务的原文仍可能入块，重付前须核对业务结果。
 
 ## RPC 节点管理
 
@@ -285,7 +288,7 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 | 4337 bundle 包含两笔操作，外层入块且执行成功，其中一笔操作执行回退 | Broadcaster 返回外层 INCLUDED 和 winningHash；Bundler 按两个 userOpHash 分别返回 success=true 和 success=false。 |
 | 首次代付前，A 在外部钱包先花掉授权 Nonce | 标记 A 的授权需核查或重签；已经发出的 R 交易仍按外层 Hash 独立跟踪。 |
 | 同一 R 并发代付两笔，第一笔提交响应超时 | 两笔使用不同的 R 账户 Nonce；重试第一笔复用其原文和 Hash。若同属 A 且 D 采用顺序操作 Nonce，还需验证两份指令各有独立、顺序可执行的编号。 |
-| 代付地址 R 的 RPC latest 返回 20，本地队列已有尚未广播的 20 | 查询仍返回 20。另一个 Hash 普通提交同一个 20 时返回 409；查询和冲突均不改变任何账户计数器。 |
+| 代付地址 R 的 RPC latest 返回 20，本地队列已有尚未广播的 20 | 查询返回 chainNonce=20、nonce=21（假设 21 可用）。另一个 Hash 普通提交同一个 20 时返回 409；查询和冲突均不改变任何账户计数器。 |
 | Solana 同一 GM fee payer 同时代付两笔已全签交易，其中一笔三家发送均超时 | 两笔独立调度。超时的交易按本地第一份签名查链；有效期内重播相同字节。 |
 | Solana 旧 blockhash 已过期，历史查询随后查到原签名已入块 | 关闭原任务并返回执行结果，即使支付服务重试也不触发重签。 |
 | Solana 旧签名确认未入块且 blockhash 已失效，上游只提供新的 GM 签名 | 缺用户的新签名时拒绝；双方对新消息签齐后才登记新版本。重复提交同一新签名只产生一个版本。 |

@@ -114,24 +114,13 @@ func (s *Service) evmSubmit(w http.ResponseWriter, r *http.Request, c Client) er
 		t, created, e = s.Store.replace(r.Context(), c.Name, old, t, v)
 	} else {
 		// Local idempotency/conflict takes precedence over a stale chain nonce.
-		existing, err := scanTask(s.Store.db.QueryRowContext(r.Context(), "SELECT "+taskColumns+" FROM tasks WHERE network=? AND sender=? AND nonce=?", t.Network, t.Sender, t.Nonce))
-		if err != nil && err != notFound {
+		existing, err := s.Store.submittedEVM(r.Context(), t, v.Hash)
+		switch {
+		case err == nil:
+			receipt(w, existing, v.Hash, false)
+			return nil
+		case err != notFound:
 			return err
-		}
-		if err == nil {
-			known, lookupErr := s.Store.lookup(r.Context(), c.Name, EVM, t.Network, v.Hash)
-			if lookupErr == nil {
-				receipt(w, known, v.Hash, false)
-				return nil
-			}
-			if lookupErr != notFound {
-				return lookupErr
-			}
-			detail := ""
-			if existing.Owner == c.Name {
-				detail = existing.ID
-			}
-			return &Fault{409, "NONCE_CONFLICT", detail}
 		}
 		// When no providers are available, intake still durably queues the task.
 		ps, err := s.endpoints(r.Context(), t.Network, true)
@@ -302,18 +291,12 @@ func (s *Service) nonce(w http.ResponseWriter, r *http.Request, c Client) error 
 	if tag != "latest" && tag != "pending" {
 		return invalid("blockTag must be latest or pending")
 	}
-	ps, e := s.endpoints(r.Context(), n, true)
+	view, e := s.accountNonce(r.Context(), n, address, tag)
 	if e != nil {
 		return e
 	}
-	for _, p := range ps {
-		count, e := s.nonceAt(r.Context(), p, address, tag)
-		if e == nil {
-			writeJSON(w, 200, map[string]string{"chainId": n, "address": address, "blockTag": tag, "nonce": strconv.FormatUint(count, 10)})
-			return nil
-		}
-	}
-	return &Fault{503, "NONCE_VIEW_UNAVAILABLE", ""}
+	writeJSON(w, 200, view)
+	return nil
 }
 
 func (s *Service) queue(w http.ResponseWriter, r *http.Request, c Client) error {

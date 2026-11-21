@@ -459,9 +459,6 @@ func (s *Service) Run(ctx context.Context) {
 		}
 	})
 	wg.Go(func() { s.notifications(ctx) })
-	if s.cfg.Scanner != nil {
-		wg.Go(func() { s.scan(ctx) })
-	}
 	for range s.cfg.Workers {
 		wg.Go(func() {
 			for ctx.Err() == nil {

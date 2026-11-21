@@ -30,7 +30,14 @@ func readConfig(path string) (broadcast.Config, error) {
 	defer f.Close()
 	d := json.NewDecoder(f)
 	d.DisallowUnknownFields()
-	if e = d.Decode(&c); e != nil {
+	// Accept the retired scanner key in existing configurations without loading
+	// credentials, validating a consumer, or starting any scanner work.
+	var config struct {
+		*broadcast.Config
+		LegacyScanner json.RawMessage `json:"scanner"`
+	}
+	config.Config = &c
+	if e = d.Decode(&config); e != nil {
 		return c, e
 	}
 	if d.Decode(new(any)) != io.EOF {
@@ -72,20 +79,6 @@ func readConfig(path string) (broadcast.Config, error) {
 			}
 		default:
 			return c, fmt.Errorf("invalid family for network %s", name)
-		}
-	}
-	if c.Scanner != nil {
-		c.Scanner.Token = os.ExpandEnv(c.Scanner.Token)
-		u, e := url.Parse(c.Scanner.URL)
-		if e != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || c.Scanner.Token == "" {
-			return c, errors.New("invalid scanner URL or token")
-		}
-		seen := map[string]bool{}
-		for chain, network := range c.Scanner.Networks {
-			if c.Networks[chain].Family != broadcast.EVM || network == "" || seen[network] {
-				return c, errors.New("invalid scanner network mapping")
-			}
-			seen[network] = true
 		}
 	}
 	names, tokens := map[string]bool{}, map[string]bool{}

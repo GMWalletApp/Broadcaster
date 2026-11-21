@@ -35,7 +35,6 @@ type Client struct {
 	WebhookSecret string `json:"webhookSecret,omitempty"`
 }
 type Config struct {
-	Scanner       *ScannerConfig     `json:"scanner,omitempty"`
 	Listen        string             `json:"listen"`
 	Networks      map[string]Network `json:"networks"`
 	Clients       []Client           `json:"clients"`
