@@ -1,0 +1,15 @@
+{
+  "listen": "127.0.0.1:8080",
+  "workers": 4,
+  "trackingHours": 24,
+  "networks": {
+    "1": {
+      "family": "evm",
+      "entryPoints": ["0x0000000071727De22E5E9d8BAf0edAc6f37da032"]
+    }
+  },
+  "clients": [
+    {"name": "wallet", "token": "${BROADCASTER_API_TOKEN}"},
+    {"name": "operations", "token": "${BROADCASTER_ADMIN_TOKEN}", "admin": true}
+  ]
+}

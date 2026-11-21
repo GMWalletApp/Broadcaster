@@ -1,8 +1,31 @@
 # Broadcaster
 
-GM Wallet 的 EVM 与 Solana 已签名交易广播服务。调用方提交签名原文，服务持久化后向最多三家独立付费 RPC 供应商并发广播，并跟踪入块结果。EVM 按外层账户 Nonce 调度；Solana 代付交易在用户和 GM 签齐后立即调度，按交易签名及 recent blockhash 的有效期跟踪。本文是首版开发契约。仓库当前处于设计阶段。
+GM Wallet 的 EVM 与 Solana 已签名交易广播服务。调用方提交签名原文，服务持久化后向最多三家独立付费 RPC 供应商并发广播，并跟踪入块结果。EVM 按外层账户 Nonce 调度；Solana 代付交易在用户和 GM 签齐后立即调度，按交易签名及 recent blockhash 的有效期跟踪。服务使用 Go 和 SQLite，可单机运行。
 
 在 EVM 上，签名方自行查询和选取 Nonce、构造交易并签名，也负责签署加价替换版本。Broadcaster 从已签名原文恢复外层发送地址和 Nonce，按账户调度已接收任务。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
+
+## 运行
+
+需要 Go 1.26.2 或更高版本、本地可写目录和自购 RPC 凭证。以下命令构建服务并在本机启动。配置示例启用以太坊；接入 Solana 时，在 networks 增加集群名、family（solana）、genesisHash 及允许代付的 feePayers 公钥数组。
+
+~~~sh
+go build -o broadcaster ./cmd/broadcaster
+cp config.example.json config.json
+export BROADCASTER_API_TOKEN="$(openssl rand -hex 32)"
+export BROADCASTER_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
+./broadcaster -config config.json -db broadcaster.db
+~~~
+
+首次生成的凭证和存储密钥应交给部署环境保存，重启时继续使用。API 使用 Bearer Token；admin 角色管理供应商，业务令牌仅能查询和修改自己的任务。网络和代付公钥配置从文件加载。监听地址默认 127.0.0.1:8080，对外服务可在反向代理终止 TLS。验证命令为 `go test -race ./...` 和 `go vet ./...`，集成测试使用临时 SQLite 文件和本机模拟 RPC。
+
+**数据库。** 程序在启动时创建表，启用 WAL、外键、5 秒 busy timeout 和 FULL 同步。签名原文、任务版本、节点冷却、广播历史及待发通知写入同一文件。变更状态使用短写事务，所有 RPC 及 Webhook 请求在事务外执行。多个 worker 通过带期限的租约领取任务，进程意外退出后其他 worker 可接手。同机进程须访问同一本地数据库并使用相同密钥。备份运行中的库请使用 SQLite 在线备份；停机复制前须完成 WAL 检查点。RPC 地址及 Bearer 凭证采用 AES-256-GCM 加密保存。
+
+**节点准入。** 管理员向 POST /rpc-providers 提交 network（或 chainId）、providerId、url、可选 bearer。在 EVM 网络附 evmProbes（受控的已签名交易数组），覆盖普通交易、Type 4，以及配置的每个 EntryPoint 的 bundle。Solana 网络附 solanaProbe，结构同 Solana 提交请求。准入会真实发送这些原文，使用专用探测账户和已批准的测试操作。添加成功后响应中的 id 用于 PATCH；仅修改 enabled 无须重新发送探测交易。
+
+**事件和 Scanner。** 在 clients 的相应条目配置 webhook（HTTPS）和 webhookSecret 可启用异步通知，密钥支持环境变量。请求体包含 eventId、event、version、data。接收方使用原始请求体和共享密钥计算 HMAC-SHA256，与 X-Broadcaster-Signature 的十六进制值核对，以 eventId 去重。配置可选 scanner 对象（url、token、networks，例如 {"1":"ethereum"}）可按待处理 EVM 任务维护地址订阅。使用专用消费者令牌，地址活动仅唤醒任务，随后仍由付费 RPC 核实。
+
+**实现范围。** EVM 解析受链 ID 保护的 legacy、Type 1、2、4。ERC-4337 支持 Bundler 签好的外层交易。Solana 接收 legacy 和 v0 完整签名交易。7702 逐项确证需要节点的交易前状态跟踪能力；提供方无此能力时保留 UNKNOWN。Solana 历史不完整时保持 CHECKING_EXPIRY，服务不会自行签名。
 
 ## EVM 调用方接口
 
@@ -205,7 +228,7 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 
 ## 故障恢复与上游事件
 
-接收事务写入任务、签名原文和调度信息后再响应。工作实例以租约领取到期任务；重启后接手失效租约，先核查全部候选 Hash，再决定按入块关闭、等待或重播。实际 RPC 调用允许重复，数据库对任务、候选和事件去重。Redis 可用于加速，PostgreSQL 保留恢复所需的原文、状态与证据。
+接收事务写入任务、签名原文和调度信息后再响应。工作实例以租约领取到期任务；重启后接手失效租约，先核查全部候选 Hash，再决定按入块关闭、等待或重播。实际 RPC 调用允许重复，数据库对任务、候选和事件去重。SQLite 保留恢复所需的原文、状态与证据。
 
 状态变更和待发事件通过同一事务写入 outbox。消息队列或 Webhook 至少一次投递，失败可重试，消费方按 eventId 去重并按任务版本处理乱序。transaction.submitted 表示已持久化，入块时 transaction.included 和 transaction.closed 携带入块证据及独立执行状态，其他终止路径的 closed 携带对应原因，transaction.replacement_required 通知签名方加价。任务被外部覆盖时发送 transaction.nonce_conflict 及 transaction.closed，携带 taskId、本地 Hash、链、账户、Nonce、consumingHash、区块和错误码。鉴权按接收方隔离。通知投递失败只重试通知。
 
