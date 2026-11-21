@@ -40,3 +40,9 @@ CREATE INDEX IF NOT EXISTS outbox_due ON outbox(due) WHERE sent IS NULL;
 CREATE TABLE IF NOT EXISTS force_audit (
  task text NOT NULL REFERENCES tasks(id), actor text NOT NULL, reason text NOT NULL, created integer NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000 AS INTEGER))
 );
+
+-- An RPC-observed creation slot can survive a fork which discards the block.
+CREATE TABLE IF NOT EXISTS solana_origins (
+ task text NOT NULL REFERENCES tasks(id), hash text NOT NULL, slot integer NOT NULL,
+ PRIMARY KEY(task,hash)
+);

@@ -17,6 +17,8 @@ type update struct {
 	state, reason, outcome, winner, consuming, execution string
 	evidence                                             json.RawMessage
 	send, bump                                           bool
+	finalized, valid, advanced                           bool
+	slot, processedSlot, rootSlot                        uint64
 }
 
 func included(hash, execution string, proof any) update {
@@ -33,9 +35,10 @@ type evmTxRef struct {
 	Auth   []types.SetCodeAuthorization `json:"authorizationList"`
 }
 type evmBlock struct {
-	Hash         string            `json:"hash"`
-	Height       string            `json:"number"`
-	Transactions []json.RawMessage `json:"transactions"`
+	Hash          string            `json:"hash"`
+	Height        string            `json:"number"`
+	Transactions  []json.RawMessage `json:"transactions"`
+	ConsumerIndex uint64            `json:"-"`
 }
 
 func (s *Service) nonceAt(ctx context.Context, p Endpoint, address, tag string) (uint64, error) {
@@ -47,16 +50,21 @@ func (s *Service) nonceAt(ctx context.Context, p Endpoint, address, tag string) 
 	return hexutil.DecodeUint64(n)
 }
 
+func isHash(value string) bool {
+	var hash common.Hash
+	return hash.UnmarshalText([]byte(value)) == nil
+}
+
 func (s *Service) block(ctx context.Context, p Endpoint, tag string, full bool) (*evmBlock, error) {
 	var b *evmBlock
 	e := s.call(ctx, p, "eth_getBlockByNumber", []any{tag, full}, &b)
 	if e != nil {
 		return nil, e
 	}
-	if b == nil || len(b.Hash) != 66 {
+	if b == nil || !isHash(b.Hash) {
 		return nil, errors.New("missing canonical block")
 	}
-	if tag != "latest" && b.Height != tag {
+	if _, err := hexutil.DecodeUint64(b.Height); err != nil || tag != "latest" && b.Height != tag {
 		return nil, errors.New("block height mismatch")
 	}
 	return b, nil
@@ -103,6 +111,10 @@ func (s *Service) evmLocation(ctx context.Context, p Endpoint, v *Version) (upda
 		return update{}, false, e
 	}
 	idx, e := hexutil.DecodeUint64(ref.Index)
+	if isHash(ref.Block) && b.Hash != ref.Block {
+		// A receipt from a displaced block can outlive the fork in an RPC cache.
+		return update{}, false, nil
+	}
 	if e != nil || idx >= uint64(len(b.Transactions)) || b.Hash != ref.Block {
 		return update{}, false, errors.New("inconsistent block or position")
 	}
@@ -207,12 +219,32 @@ func (s *Service) diagnose(ctx context.Context, p Endpoint, v *Version, sender s
 // Locate the first canonical block after the account crossed the task nonce.
 // Archival reads may be unavailable; callers then keep RESOLVING_NONCE.
 func (s *Service) consumer(ctx context.Context, p Endpoint, t Task, target, hi uint64) (string, *evmBlock, error) {
+	// Most conflicts are recent. Start at the tip so a node which prunes
+	// historical state can still identify a transaction in its retained window.
+	tip := hi
 	var lo uint64
+	for step := uint64(1); hi > 0; {
+		probe := tip - min(tip, step)
+		n, err := s.nonceAt(ctx, p, t.Sender, hexutil.EncodeUint64(probe))
+		if err != nil || n <= target {
+			lo = probe + 1
+			break
+		}
+		hi = probe
+		if step > tip/2 {
+			step = tip
+		} else {
+			step *= 2
+		}
+	}
 	for lo < hi {
 		mid := lo + (hi-lo)/2
 		n, e := s.nonceAt(ctx, p, t.Sender, hexutil.EncodeUint64(mid))
 		if e != nil {
-			return "", nil, e
+			// A missing state is never proof of consumption. The block itself
+			// must still identify the exact sender/nonce or an applied tuple.
+			lo = mid + 1
+			continue
 		}
 		if n > target {
 			hi = mid
@@ -224,12 +256,13 @@ func (s *Service) consumer(ctx context.Context, p Endpoint, t Task, target, hi u
 	if e != nil {
 		return "", nil, e
 	}
-	for _, raw := range b.Transactions {
+	for i, raw := range b.Transactions {
 		var tx evmTxRef
-		if json.Unmarshal(raw, &tx) != nil {
+		if json.Unmarshal(raw, &tx) != nil || !isHash(tx.Hash) {
 			continue
 		}
 		if strings.EqualFold(tx.Sender, t.Sender) && tx.Nonce == hexutil.EncodeUint64(target) {
+			b.ConsumerIndex = uint64(i)
 			return tx.Hash, b, nil
 		}
 		if len(tx.Auth) == 0 {
@@ -254,6 +287,7 @@ func (s *Service) consumer(ctx context.Context, p Endpoint, t Task, target, hi u
 			s.diagnose(ctx, p, &v, strings.ToLower(tx.Sender), b.Hash, true)
 			for _, a := range v.Authorizations {
 				if a.Result == "APPLIED" && a.Authority == t.Sender && a.Nonce == t.Nonce {
+					b.ConsumerIndex = uint64(i)
 					return tx.Hash, b, nil
 				}
 			}
@@ -263,11 +297,13 @@ func (s *Service) consumer(ctx context.Context, p Endpoint, t Task, target, hi u
 }
 
 func (s *Service) observeEVM(ctx context.Context, p Endpoint, t *Task) (update, error) {
+	var lookupErr error
 	for i := range t.Versions {
 		v := &t.Versions[i]
 		u, yes, e := s.evmLocation(ctx, p, v)
 		if e != nil {
-			return update{}, e
+			lookupErr = e
+			continue
 		}
 		if yes {
 			var location struct {
@@ -299,10 +335,13 @@ func (s *Service) observeEVM(ctx context.Context, p Endpoint, t *Task) (update, 
 		}
 		for i := range t.Versions {
 			if t.Versions[i].Hash == h {
-				return included(h, "UNKNOWN", map[string]any{"blockHash": b.Hash, "blockNumber": b.Height, "completionBasis": "BLOCK_INCLUSION"}), nil
+				return included(h, "UNKNOWN", map[string]any{"blockHash": b.Hash, "blockNumber": b.Height, "completionBasis": "BLOCK_INCLUSION", "transactionIndex": hexutil.EncodeUint64(b.ConsumerIndex)}), nil
 			}
 		}
-		return update{state: "CLOSED", outcome: "REPLACED_EXTERNALLY", reason: "NONCE_CONSUMED_EXTERNALLY", consuming: h, evidence: bodyJSON(map[string]string{"blockHash": b.Hash, "blockNumber": b.Height})}, nil
+		return update{state: "CLOSED", outcome: "REPLACED_EXTERNALLY", reason: "NONCE_CONSUMED_EXTERNALLY", consuming: h, evidence: bodyJSON(map[string]string{"blockHash": b.Hash, "blockNumber": b.Height, "transactionIndex": hexutil.EncodeUint64(b.ConsumerIndex)})}, nil
+	}
+	if lookupErr != nil {
+		return update{}, lookupErr
 	}
 	if current < wanted && !t.Force {
 		pending, e := s.nonceAt(ctx, p, t.Sender, "pending")

@@ -117,7 +117,9 @@ flowchart TD
     T -->|显式 replacement| T
     Q -->|发现 Nonce 已越过| R["RESOLVING_NONCE：暂停该槽重播"]
     T -->|发现 Nonce 已越过| R
-    R -->|重新核实该值仍可用| T
+    T -->|规范区块视图分歧| R
+    R -->|链回退且仍缺前序 Nonce| Q
+    R -->|重新核实该值可调度| T
     Q -->|候选已在块内| I["CLOSED / INCLUDED"]
     T -->|候选已在块内| I
     R -->|本任务任一候选在块内| I
@@ -137,12 +139,14 @@ flowchart TD
 | QUEUED | 账户排序允许（或有效 force），且至少一家可发送 | TRACKING，发送首轮。缺前序 Nonce 或没有可用节点时保持 QUEUED，记录原因。 |
 | TRACKING | RPC 返回接收、拒绝、超时，或签名方提供替换交易 | 保持 TRACKING，更新对应 Hash 和节点记录。替换版本开始调度，旧版本停止主动重播，仍参与入块核查。 |
 | QUEUED / TRACKING | 规范链账户 Nonce 已大于本地交易 Nonce，尚未核实消耗者 | RESOLVING_NONCE。暂停该任务调度；查所有候选及区块。 |
-| RESOLVING_NONCE | 证据不足，或复核发现此前读数已失效 | 证据不足保持原状态；若目标值仍可用，回 TRACKING，按正常排序和选点约束恢复。 |
+| RESOLVING_NONCE | 证据不足，或复核发现此前读数已失效 | 有分歧时保持核查。链上 Nonce 回退后，若缺前序值则回 QUEUED / NONCE_GAP，具备发送条件则回 TRACKING。 |
 | 任意未关闭状态 | 在当前规范区块核实任务内某个 Hash | CLOSED / INCLUDED，记录 winningHash 及独立执行结果，其他候选记 REPLACED。通知上游并更新账户队列。 |
 | RESOLVING_NONCE | 定位到任务外交易消耗该 Nonce（含已生效的 7702 授权） | CLOSED / REPLACED_EXTERNALLY。返回错误 NONCE_CONSUMED_EXTERNALLY、受影响的本地 Nonce 和 Hash、消耗者及区块，停止全部候选。通知原提交方并重排队列。 |
 | 未关闭状态 | 所有候选永久无效且证据充分 / 配置的追踪期限到达 | 分别以 CLOSED / REJECTED 或 CLOSED / EXPIRED 结束。后者保留最后观测，已发原文仍可能上链。 |
 
 已接收任务的外部覆盖通过 GET 任务结果和异步事件报告。核查期间查询可见 RESOLVING_NONCE；单个 RPC 拒绝、空回执、链上 Nonce 增长都不能单独证明“外部覆盖”。已绑定 Hash 的本地任务历史可追溯；新的签名交易不得复用被链上消耗的槽位。
+
+**重组与供应商分歧。** 每轮并行核查可读端点。发现候选入块或外部消耗时，在回执查询、7702 诊断和历史查询完成后，重新按高度读取见证节点的规范块，并比对其他可读节点在该高度的区块 Hash。任一节点给出不同的块、候选赢家或明确相反的执行结果，任务进入 `RESOLVING_NONCE / CHAIN_VIEW_CONFLICT`，暂停重播，下一轮复核。落后节点尚无该块或暂时读不到时，可依据一家完成核查的供应商关闭。一个旧候选的孤块回执不会挡住新候选的核查。任务保存获胜 Hash、区块及观测时间，只向上游报告一次逻辑关闭事件。关闭之后发生重组，查询仍返回已保存的入块快照；依赖最终性的结算方需自行等待目标链的最终性条件。[EIP-1898 对跨 RPC 读取一致性的说明](https://eips.ethereum.org/EIPS/eip-1898)
 
 ### 签名交易与节点请求
 
@@ -225,6 +229,19 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 | RESIGN_REQUIRED | 上游获取新 recent blockhash，用户与 GM 对更新后的同一 message 全部重新签名，并调用 resign | 新版本从 READY 开始，产生新的 signature，复用原 taskId 和 paymentId。等签名期间不发起广播。 |
 
 签名方使用 getLatestBlockhash 一次取得 blockhash 及其 lastValidBlockHeight，建议使用 confirmed，广播预检采用一致的 commitment，并传 minContextSlot 避免落后节点误判。有效高度是签名原文之外的元数据；应核对消息中的 hash 与上游取得的配对记录。授权重签前，用健康节点核实同一旧 hash 在 finalized 视图中已失效、该视图已越过有效高度，再用 getSignatureStatuses（searchTransactionHistory=true）及具备历史覆盖的节点核查旧签名。无法确认旧交易结果时继续查询并对外报告原因。进程重启或通知重投都沿用已持久化的支付任务和签名版本。[获取 blockhash](https://solana.com/docs/rpc/http/getlatestblockhash) · [发送交易](https://solana.com/docs/rpc/http/sendtransaction) · [查询签名](https://solana.com/docs/rpc/http/getsignaturestatuses) · [交易确认与过期](https://solana.com/docs/advanced/confirmation)
+
+### 分叉与不完整的历史
+
+服务在接单时，或首次观测到有效 blockhash 时，向 RPC 查询签名上下文所指的区块。只有该块的实际 Hash 与签名原文一致，才持久化其创建 slot。过期核查沿 finalized 区块的 parentSlot 和 previousBlockhash 回溯并检查每个区块的签名列表，进度可跨进程重启恢复。
+
+| 观测 | 处理 |
+|---|---|
+| 核查期间 confirmed 视图再次证明原 hash 有效 | 恢复跟踪，按原签名重播；若其他节点已有过期的历史证据，则先处理分歧。 |
+| 已见证的创建块后来成为孤块 | 最终链高度越过有效期、旧 hash 失效，且完整父链回溯覆盖创建 slot 后仍查无签名，可以要求重签。没有可靠的创建 slot 时，查到签名对应的原 blockhash 也能界定有效窗口。 |
+| 节点仍返回 processed | 已验证的最终链历史覆盖该 slot 时可排除已丢弃分叉上的观测。processed 高于核查起点时，继续等待新 finalized 视图。 |
+| 历史缺块、父 Hash 不符或创建位置无法验证 | 保持 CHECKING_EXPIRY，保留可用进度，继续尝试其他节点。调用方提供的 slot、高度和一次空查询都不能单独授权重签。 |
+| 节点在 confirmed 层给出冲突的入块位置或执行结果 | 暂停关闭，等待一致视图或更强的 finalized 证据。 |
+| 节点恢复后发现调用方在断网接单时给出的有效高度过大 | 用新鲜的 finalized blockhash 有效窗口识别矛盾，再以完整历史核查旧签名。 |
 
 ## 故障恢复与上游事件
 

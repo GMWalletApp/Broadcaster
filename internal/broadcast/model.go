@@ -61,6 +61,7 @@ type Version struct {
 	Blockhash      string          `json:"blockhash,omitempty"`
 	Intent         string          `json:"-"`
 	ContextSlot    uint64          `json:"contextSlot,omitempty"`
+	OriginSlot     uint64          `json:"verifiedOriginSlot,omitempty"`
 	LastValid      uint64          `json:"lastValidBlockHeight,omitempty"`
 	Authorizations []Authorization `json:"authorizations,omitempty"`
 	Broadcasts     []Delivery      `json:"broadcasts,omitempty"`
@@ -85,7 +86,7 @@ type Task struct {
 	Revision  int64           `json:"version"`
 	Force     bool            `json:"-"`
 	Created   time.Time       `json:"createdAt"`
-	Next      time.Time       `json:"nextCheckAt"`
+	Next      time.Time       `json:"nextCheckAt,omitzero"`
 }
 type Delivery struct {
 	ID       string    `json:"id"`

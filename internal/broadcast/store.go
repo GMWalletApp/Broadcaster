@@ -85,7 +85,9 @@ func scanTask(row scanner) (Task, error) {
 	err := row.Scan(&t.ID, &t.Owner, &t.Family, &t.Network, &t.Sender, &t.Nonce, &t.Payment, &t.State, &t.Active, &t.Outcome, &t.Winner, &t.Consuming, &t.Execution, &t.Reason, &evidence, &t.Revision, &t.Force, &created, &due)
 	t.Evidence = evidence
 	t.Created = time.UnixMilli(created).UTC()
-	t.Next = time.UnixMilli(due).UTC()
+	if due > 0 && t.State != "CLOSED" && t.State != "RESIGN_REQUIRED" {
+		t.Next = time.UnixMilli(due).UTC()
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = notFound
 	}
@@ -117,7 +119,7 @@ func find(ctx context.Context, tx *sql.Tx, owner string, family Family, network,
 }
 
 func versions(ctx context.Context, tx *sql.Tx, task string) ([]Version, error) {
-	rows, e := tx.QueryContext(ctx, "SELECT hash,state,raw,blockhash,intent,context_slot,last_valid,auth FROM versions WHERE task=?1 ORDER BY created,rowid", task)
+	rows, e := tx.QueryContext(ctx, "SELECT hash,state,raw,blockhash,intent,context_slot,last_valid,auth,coalesce((SELECT slot FROM solana_origins o WHERE o.task=versions.task AND o.hash=versions.hash),0) FROM versions WHERE task=?1 ORDER BY created,rowid", task)
 	if e != nil {
 		return nil, e
 	}
@@ -126,7 +128,7 @@ func versions(ctx context.Context, tx *sql.Tx, task string) ([]Version, error) {
 	for rows.Next() {
 		var v Version
 		var auth []byte
-		if e = rows.Scan(&v.Hash, &v.State, &v.Raw, &v.Blockhash, &v.Intent, &v.ContextSlot, &v.LastValid, &auth); e != nil {
+		if e = rows.Scan(&v.Hash, &v.State, &v.Raw, &v.Blockhash, &v.Intent, &v.ContextSlot, &v.LastValid, &auth, &v.OriginSlot); e != nil {
 			return nil, e
 		}
 		if e = json.Unmarshal(auth, &v.Authorizations); e != nil {
@@ -183,6 +185,9 @@ func insertVersion(ctx context.Context, tx *sql.Tx, t Task, v Version) error {
 	r, e := tx.ExecContext(ctx, "INSERT INTO versions(network,hash,task,raw,state,blockhash,intent,context_slot,last_valid,auth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT DO NOTHING", t.Network, v.Hash, t.ID, v.Raw, v.State, v.Blockhash, v.Intent, v.ContextSlot, v.LastValid, bodyJSON(v.Authorizations))
 	if e == nil && affected(r) == 0 {
 		return conflict("HASH_ALREADY_REGISTERED")
+	}
+	if e == nil && v.OriginSlot > 0 {
+		_, e = tx.ExecContext(ctx, "INSERT INTO solana_origins(task,hash,slot) VALUES (?,?,?)", t.ID, v.Hash, v.OriginSlot)
 	}
 	return e
 }

@@ -57,7 +57,10 @@ func TestExternalNonceConsumption(t *testing.T) {
 			if string(args[1]) == "true" {
 				return map[string]any{"hash": block, "number": "0x63", "transactions": []any{map[string]string{"hash": other, "from": task.Sender, "nonce": "0x5"}}}, nil
 			}
-			return map[string]any{"hash": block, "number": "0x64", "transactions": []string{}}, nil
+			if string(args[0]) == `"0x63"` {
+				return map[string]any{"hash": block, "number": "0x63", "transactions": []string{other}}, nil
+			}
+			return map[string]any{"hash": "0x" + strings.Repeat("c", 64), "number": "0x64", "transactions": []string{}}, nil
 		}
 		return nil, &rpcError{-32601, "unsupported"}
 	})

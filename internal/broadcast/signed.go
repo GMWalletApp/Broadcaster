@@ -35,7 +35,7 @@ func decodeEVM(raw string) (Task, Version, error) {
 	default:
 		return t, v, invalid("unsupported EVM envelope")
 	}
-	if tx.Gas() < minimumGas(&tx) || tx.Nonce() == math.MaxUint64 || tx.GasFeeCap().Cmp(tx.GasTipCap()) < 0 {
+	if tx.Gas() < minimumGas(&tx) || tx.Nonce() == math.MaxUint64 || tx.GasFeeCap().BitLen() > 256 || tx.GasTipCap().BitLen() > 256 || tx.GasFeeCap().Cmp(tx.GasTipCap()) < 0 {
 		return t, v, invalid("invalid nonce, gas limit or fee caps")
 	}
 	if tx.Type() == types.SetCodeTxType && len(tx.SetCodeAuthorizations()) == 0 {

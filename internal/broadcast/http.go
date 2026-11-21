@@ -150,8 +150,8 @@ func (s *Service) evmSubmit(w http.ResponseWriter, r *http.Request, c Client) er
 					if err == nil {
 						height, err := hexutil.DecodeUint64(head.Height)
 						if err == nil {
-							consumer, _, err := s.consumer(r.Context(), p, t, nonce, height)
-							if err == nil && consumer != "" && consumer != v.Hash {
+							consumer, block, err := s.consumer(r.Context(), p, t, nonce, height)
+							if err == nil && consumer != "" && consumer != v.Hash && s.agreeOnBlock(r.Context(), ps, p.ID, block.Height, block.Hash) {
 								return conflict("NONCE_CONSUMED")
 							}
 						}
@@ -201,7 +201,7 @@ func (s *Service) solSubmit(w http.ResponseWriter, r *http.Request, c Client) er
 		return lookupErr
 	}
 	if lookupErr == notFound {
-		if err := s.checkWindow(r.Context(), v, t.Network); err != nil {
+		if err := s.checkWindow(r.Context(), &v, t.Network); err != nil {
 			return err
 		}
 	}

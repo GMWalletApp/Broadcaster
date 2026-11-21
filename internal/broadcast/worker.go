@@ -3,9 +3,9 @@ package broadcast
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +35,9 @@ func (s *Service) claim(ctx context.Context) (Task, string, error) {
 		// Leftover calls are ambiguous after a process dies. Never infer rejection.
 		_, e = tx.ExecContext(ctx, "UPDATE deliveries SET state='UNKNOWN',detail='interrupted broadcast' WHERE task=? AND state='IN_FLIGHT'", t.ID)
 		if e != nil {
+			return e
+		}
+		if _, e = tx.ExecContext(ctx, "UPDATE versions SET state='SUBMISSION_UNKNOWN' WHERE task=? AND state='BROADCASTING'", t.ID); e != nil {
 			return e
 		}
 		t.Versions, e = versions(ctx, tx, t.ID)
@@ -220,7 +223,7 @@ func (s *Service) broadcast(ctx context.Context, t *Task, token string, u update
 		if accepted {
 			u.bump = false
 		}
-	case unknown:
+	case unknown || active.State == "SUBMISSION_UNKNOWN":
 		active.State = "SUBMISSION_UNKNOWN"
 	default:
 		active.State = "QUEUED"
@@ -241,6 +244,14 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 	t.Consuming = u.consuming
 	t.Execution = u.execution
 	t.Evidence = u.evidence
+	if u.outcome == "INCLUDED" || u.outcome == "REPLACED_EXTERNALLY" {
+		var evidence map[string]json.RawMessage
+		if err := json.Unmarshal(u.evidence, &evidence); err != nil {
+			return err
+		}
+		evidence["observedAt"] = bodyJSON(time.Now().UTC())
+		t.Evidence = bodyJSON(evidence)
+	}
 	t.Revision++
 	delay := 3 * time.Second
 	if t.Reason == "NO_AVAILABLE_PROVIDER" || t.State == "CHECKING_EXPIRY" {
@@ -250,12 +261,17 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 		delay = 30 * time.Second
 	}
 	t.Next = time.Now().Add(delay)
+	due := t.Next.UnixMilli()
+	if t.State == "CLOSED" || t.State == "RESIGN_REQUIRED" {
+		t.Next = time.Time{}
+		due = 0
+	}
 	return s.Store.atomic(ctx, func(tx *sql.Tx) error {
 		r, e := tx.ExecContext(ctx, `UPDATE tasks
             SET state=?, outcome=?, winner=?, consuming=?, execution=?, reason=?,
                 evidence=?, revision=?, due=?, forced=CASE WHEN ? THEN false ELSE forced END,
                 lease=NULL, lease_until=NULL
-            WHERE id=? AND lease=? AND revision=?`, t.State, t.Outcome, t.Winner, t.Consuming, t.Execution, t.Reason, []byte(t.Evidence), t.Revision, t.Next.UnixMilli(), u.send && u.reason != "NO_AVAILABLE_PROVIDER", t.ID, token, t.Revision-1)
+            WHERE id=? AND lease=? AND revision=?`, t.State, t.Outcome, t.Winner, t.Consuming, t.Execution, t.Reason, []byte(t.Evidence), t.Revision, due, u.send && u.reason != "NO_AVAILABLE_PROVIDER", t.ID, token, t.Revision-1)
 		if e != nil {
 			return e
 		}
@@ -273,10 +289,29 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 				v.State = t.Outcome
 			case (t.State == "CHECKING_EXPIRY" || t.State == "RESIGN_REQUIRED") && v.Hash == t.Active:
 				v.State = t.State
+			case t.State == "TRACKING" && t.Family == Solana && v.Hash == t.Active && u.processedSlot > 0:
+				v.State = "PENDING"
+			case t.Family == Solana && v.Hash == t.Active && v.State == "CHECKING_EXPIRY" && u.valid:
+				// The old hash is live again. Restore what we know about any
+				// previous sends even if rebroadcast is throttled this round.
+				e = tx.QueryRowContext(ctx, `SELECT CASE
+				  WHEN count(*) FILTER (WHERE state IN ('ACCEPTED','ALREADY_KNOWN'))>0 THEN 'PENDING'
+				  WHEN count(*) FILTER (WHERE state IN ('UNKNOWN','IN_FLIGHT'))>0 THEN 'SUBMISSION_UNKNOWN'
+				  ELSE 'READY' END FROM deliveries WHERE task=? AND hash=?`, t.ID, v.Hash).Scan(&v.State)
+				if e != nil {
+					return e
+				}
 			}
-			_, e = tx.ExecContext(ctx, "UPDATE versions SET state=?,auth=? WHERE task=? AND hash=?", v.State, bodyJSON(v.Authorizations), t.ID, v.Hash)
+			_, e = tx.ExecContext(ctx, `UPDATE versions SET state=CASE
+				WHEN state='PENDING' AND ?1 IN ('READY','QUEUED','BROADCASTING','SUBMISSION_UNKNOWN') THEN state
+				ELSE ?1 END, auth=?2 WHERE task=?3 AND hash=?4`, v.State, bodyJSON(v.Authorizations), t.ID, v.Hash)
 			if e != nil {
 				return e
+			}
+			if v.OriginSlot != 0 {
+				if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO solana_origins(task,hash,slot) VALUES (?,?,?)", t.ID, v.Hash, v.OriginSlot); e != nil {
+					return e
+				}
 			}
 		}
 		if t.State == "CLOSED" && t.Family == EVM {
@@ -306,68 +341,30 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 	})
 }
 
-func (s *Service) observe(ctx context.Context, t *Task, ps []Endpoint) update {
-	var e error
-	u := update{state: t.State, reason: "NO_AVAILABLE_PROVIDER", evidence: t.Evidence}
-	var unresolved *update
-	var gap *update
-	for _, p := range ps {
-		var next update
-		if t.Family == EVM {
-			next, e = s.observeEVM(ctx, p, t)
-		} else {
-			next, e = s.observeSolana(ctx, p, t)
-		}
-		if e != nil {
-			u.reason = "CHAIN_VIEW_UNAVAILABLE"
+// Recovered tasks can predate today's intake checks. Only immutable signed
+// bytes can prove a permanent local rejection. RPC refusals are observations.
+func validateScheduledEVM(t *Task, next update) update {
+	var activeInvalid bool
+	allInvalid := true
+	for i := range t.Versions {
+		v := &t.Versions[i]
+		_, _, err := decodeEVM(v.Raw)
+		if err == nil {
+			allInvalid = false
 			continue
 		}
-		if next.state == "RESOLVING_NONCE" || next.state == "CHECKING_EXPIRY" {
-			if unresolved == nil || string(next.evidence) != string(t.Evidence) {
-				snapshot := next
-				unresolved = &snapshot
-			}
-			continue
+		v.State = "REJECTED"
+		if v.Hash == t.Active {
+			activeInvalid = true
 		}
-		if next.reason == "NONCE_GAP" || next.reason == "BLOCKHASH_NOT_VISIBLE" {
-			snapshot := next
-			gap = &snapshot
-			continue
-		}
-		if unresolved != nil && next.send {
-			continue
-		}
-		u = next
-		gap = nil
-		unresolved = nil
-		if t.Family == Solana && next.state == "RESIGN_REQUIRED" {
-			for _, other := range ps {
-				if other.ID == p.ID {
-					continue
-				}
-				status, err := s.solStatus(ctx, other, t.Active)
-				if err != nil {
-					continue
-				}
-				if status != nil {
-					if slices.Contains([]string{"confirmed", "finalized"}, status.Commitment) {
-						u = solIncluded(t.Active, status)
-					} else {
-						u = update{state: "CHECKING_EXPIRY", reason: "CONFLICTING_HISTORY", evidence: t.Evidence}
-					}
-					break
-				}
-			}
-		}
-		break
 	}
-	if gap != nil {
-		u = *gap
+	if allInvalid && len(t.Versions) > 0 {
+		return update{state: "CLOSED", outcome: "REJECTED", reason: "INVALID_SIGNED_TRANSACTION"}
 	}
-	if unresolved != nil {
-		u = *unresolved
+	if activeInvalid {
+		return update{state: "TRACKING", reason: "REPLACEMENT_REQUIRED", bump: true}
 	}
-	return u
+	return next
 }
 
 func (s *Service) process(ctx context.Context, t *Task, token string) error {
@@ -375,9 +372,12 @@ func (s *Service) process(ctx context.Context, t *Task, token string) error {
 	if e != nil {
 		return e
 	}
-	u := s.observe(ctx, t, ps)
+	// Keep time for a durable transition even if archival reads time out.
+	observation, cancel := context.WithTimeout(ctx, 45*time.Second)
+	u := s.observe(observation, t, ps)
+	cancel()
 	if t.Family == EVM && u.state != "CLOSED" && time.Since(t.Created) > time.Duration(s.cfg.TrackingHours)*time.Hour {
-		u = update{state: "CLOSED", outcome: "EXPIRED", reason: "TRACKING_DEADLINE"}
+		u = update{state: "CLOSED", outcome: "EXPIRED", reason: "TRACKING_DEADLINE", evidence: bodyJSON(map[string]any{"lastState": u.state, "lastReason": u.reason, "lastEvidence": u.evidence})}
 	}
 	if u.send {
 		// Continuously observe receipts. Throttle resends independently of reads.
@@ -389,9 +389,14 @@ func (s *Service) process(ctx context.Context, t *Task, token string) error {
 		if !t.Force && time.Since(time.UnixMilli(last)) < 15*time.Second {
 			u.send = false
 		} else {
-			u, e = s.broadcast(ctx, t, token, u)
-			if e != nil {
-				return e
+			if t.Family == EVM {
+				u = validateScheduledEVM(t, u)
+			}
+			if u.send {
+				u, e = s.broadcast(ctx, t, token, u)
+				if e != nil {
+					return e
+				}
 			}
 		}
 	}
