@@ -10,7 +10,7 @@ Broadcaster 按链和账户协调 Nonce 预留。签名方取得预留后构造�
 
 | 方法与路径 | 输入 | 响应与副作用 |
 |---|---|---|
-| POST /transactions | rawTransaction、可选 reservationId | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由不同 Hash 登记时返回 409 NONCE_CONFLICT。 |
+| POST /transactions | rawTransaction、可选 reservationId；Type 4 可附逐条授权的预留引用 | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由不同 Hash 登记时返回 409 NONCE_CONFLICT。 |
 | GET /transactions/{hash} | 原始或替换 Hash | 返回 200，包含任务阶段和结果、所查 Hash 的状态、当前调度版本、全部候选、各轮各节点结果、链上证据及 7702 诊断。未知或不可见的 Hash 返回 404。 |
 | POST /transactions/{hash}/force | reason | 对当前可调度版本立即安排一轮广播，记录操作者、时间和原因，返回 202。只跳过本地 Nonce 排序，仍受节点冷却、可用性及链上状态约束。同一轮已排队或在途时复用该轮。 |
 | POST /transactions/{hash}/replacement | rawTransaction | 用路径指定待替换的当前版本。新签名交易通过校验，且 chainId、sender、nonce 相同后，在原任务下登记新 Hash，返回 202。重复提交同一已登记替换版本返回 200。原 Hash 继续接受链上监控。 |
@@ -171,7 +171,26 @@ flowchart TD
 | Bundler → Broadcaster | GET /transactions/{hash} 或入块通知 | Bundler 保存 userOpHash 到外层任务的关联，按 winningHash 定位实际入块版本。若发生替换或重新打包，以实际入块交易中可核实的操作为准。 |
 | 钱包 → Bundler | eth_getUserOperationReceipt(userOpHash) | 按 EntryPoint 事件核实指定操作是否入块，通过单条操作回执的 success 报告执行结果。一个 bundle 内各操作可能有不同结果。 |
 
-Broadcaster 的 next-nonce 和 nonce-reservations 只协调外层交易发送方。智能账户的 UserOperation Nonce 由对应 EntryPoint 按账户和 nonce key 管理，签名前可调用 EntryPoint.getNonce(sender, key)。外层交易 CLOSED / INCLUDED 后，Bundler 仍须按 userOpHash 核实每笔操作；外层回执成功不能证明每笔操作成功。[ERC-4337](https://eips.ethereum.org/EIPS/eip-4337) · [ERC-7769 Bundler RPC](https://eips.ethereum.org/EIPS/eip-7769)
+在 ERC-4337 路径中，Bundler 为外层发送账户预留交易 Nonce；随包提供新 7702 授权时，授权账户的预留规则见下节。智能账户的 UserOperation Nonce 由对应 EntryPoint 按账户和 nonce key 管理，签名前可调用 EntryPoint.getNonce(sender, key)。外层交易 CLOSED / INCLUDED 后，Bundler 仍须按 userOpHash 核实每笔操作；外层回执成功不能证明每笔操作成功。[ERC-4337](https://eips.ethereum.org/EIPS/eip-4337) · [ERC-7769 Bundler RPC](https://eips.ethereum.org/EIPS/eip-7769)
+
+### EIP-7702 委托与后续 Gas 代付
+
+设 A 是用户地址，R 是 GM 专用代付地址，D 是 GM 的委托实现合约。以下描述 R 与 A 不同、GM 直接代付的路径。
+
+| 场景 | 用户 A 签什么 | 谁用哪个 Nonce |
+|---|---|---|
+| 首次设置或变更委托 | A 签署指向 D 的 7702 授权，R 将授权装入 Type 4 交易并签署外层交易。 | 授权使用 **A 的链上账户 Nonce**，外层交易使用 **R 的链上账户 Nonce**。A 自己从外部钱包发出的普通交易也消耗 A 的账户 Nonce。 |
+| 委托已生效，后续代付转账 | A 按 D 的规则签署本次转账指令，绑定目标、调用数据、金额及防重放凭据。R 签署发往 **A** 的外层交易并支付 Gas，链在 A 的账户上下文执行 D 的代码。 | 外层仍使用 **R 的链上账户 Nonce**。指令使用 D 为 A 定义的防重放机制；若采用顺序操作 Nonce，同一用户的并发签名须协调这个编号。沿用现有委托时无需再次签署 7702 授权。 |
+
+**首次授权的占位。** GM 签名流程在签署前分别为 A 的授权和 R 的外层交易预留账户 Nonce。A 的授权与 GM 内部为 A 发起的普通交易共享同一组 (chainId, address, nonce) 槽位。提交时将 R 的 reservationId 与每条授权的预留引用分开传递，按授权索引核对签名恢复的 A、链和 Nonce，将授权占位关联到该任务。若 A 的外部转账抢先入块，通知签名方重新核查授权；已经发出的 R 交易继续按其 Hash 跟踪。Broadcaster 已掌握自己提交的授权列表。ChainScanner 可沿用现有地址订阅触发对账，预留前仍核查链上状态，首版无需为此索引全网 7702 授权。
+
+**后续代付的调用顺序。**
+
+1. 代付服务以稳定的业务请求 ID 作为 `Idempotency-Key`，直接调用 `POST /accounts/{R}/nonce-reservations`，保存返回的 `reservationId` 和 Nonce。Broadcaster 在账户锁内完成选取和占位；`GET next-nonce` 仅用于查看。
+2. 取得 A 对本次操作的有效签名后，代付服务使用预留值构造并签署 R 的外层交易，保存业务请求、预留、已签名原文与 Hash 的关联，再携带 `reservationId` 调用 `POST /transactions`。R 的所有发送实例共用 Broadcaster 的排序器。
+3. 预留响应超时，使用原幂等键重试；提交响应超时，按原 Hash 查询或重交同一份签名原文。只有明确需要加价时才走同 Nonce 的 replacement 流程。
+
+例如，R 给两笔支付分别预留 `100` 和 `101`。如果两笔都属于 A，而 D 对 A 采用顺序操作编号，签名流程还要分别协调 `7` 和 `8`，并保持执行顺序。A 用外部钱包普通转账只会推进 A 的链上账户 Nonce；已签操作仍可能因余额变化而执行失败。实际操作编号与签名字段以所部署的 D 为准。[EIP-7702 授权处理](https://eips.ethereum.org/EIPS/eip-7702#behavior) · [委托持久性](https://eips.ethereum.org/EIPS/eip-7702#persistence-of-code-delegation) · [签名与防重放](https://eips.ethereum.org/EIPS/eip-7702#security-considerations)
 
 ### EIP-7702 诊断
 
@@ -201,3 +220,5 @@ Broadcaster 的 next-nonce 和 nonce-reservations 只协调外层交易发送方
 | 一个区块越过多个预留和任务，仅部分候选回执已可见 | 已核实的本地交易按入块关闭，失效预留通知持有人，来源待查的任务暂停重播；新的预留从更新后的可用槽位分配。 |
 | 低位预留过期，同时旧持有人和新服务提交 | 原子回收与消费至多一方先取得槽位；已过期凭据返回 409，新持有人的占位不会被覆盖。 |
 | 4337 bundle 包含两笔操作，外层入块且执行成功，其中一笔操作执行回退 | Broadcaster 返回外层 INCLUDED 和 winningHash；Bundler 按两个 userOpHash 分别返回 success=true 和 success=false。 |
+| 首次代付前，A 在外部钱包先花掉授权 Nonce | 标记 A 的授权需核查或重签；已经发出的 R 交易仍按外层 Hash 独立跟踪。 |
+| 同一 R 并发代付两笔，第一笔提交响应超时 | 两笔使用不同的 R 账户 Nonce；重试第一笔复用其原文和 Hash。若同属 A 且 D 采用顺序操作 Nonce，还需验证两份指令各有独立、顺序可执行的编号。 |
