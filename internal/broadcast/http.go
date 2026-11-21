@@ -52,6 +52,10 @@ func (s *Service) Handler() http.Handler {
 	bind("GET /solana/transactions/{signature}", false, s.getTask(Solana))
 	bind("POST /rpc-providers", true, s.putProvider)
 	bind("PATCH /rpc-providers/{id}", true, s.putProvider)
+	bind("GET /rpc-providers/defaults", true, func(w http.ResponseWriter, r *http.Request, c Client) error {
+		writeJSON(w, 200, s.defaultProviders(r.URL.Query().Get("network")))
+		return nil
+	})
 	bind("GET /rpc-providers", true, func(w http.ResponseWriter, r *http.Request, c Client) error {
 		ps, e := s.endpoints(r.Context(), r.URL.Query().Get("chainId"), false)
 		if e == nil {

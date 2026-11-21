@@ -40,6 +40,9 @@ func (s *Service) endpoint(row scanner) (Endpoint, error) {
 		return p, err
 	}
 	err = json.Unmarshal(sec, &p.secret)
+	if err == nil {
+		s.identifyRoute(&p)
+	}
 	return p, err
 }
 
@@ -196,11 +199,30 @@ func (s *Service) admit(ctx context.Context, p Endpoint, input ProviderInput) er
 }
 
 func (s *Service) configure(ctx context.Context, key string, in ProviderInput) (Endpoint, error) {
+	if in.Chain != "" && in.Network != "" && in.Chain != in.Network {
+		return Endpoint{}, invalid("chainId and network disagree")
+	}
+	if in.Network == "" {
+		in.Network = in.Chain
+	}
+	if key == "" && strings.EqualFold(in.Provider, publicNode) && in.URL == nil {
+		return s.newPublicNode(ctx, in.Network, in)
+	}
+	if strings.HasPrefix(key, publicNode+":") && (in.Network != "" || in.Provider != "" || in.URL != nil || in.Bearer != nil) {
+		return Endpoint{}, invalid("the default route is fixed; use a separate endpoint for custom settings")
+	}
+	return s.saveProvider(ctx, key, "", in)
+}
+
+func (s *Service) saveProvider(ctx context.Context, key, defaultID string, in ProviderInput) (Endpoint, error) {
 	var p Endpoint
 	var e error
 	newRow := key == ""
 	if newRow {
-		p.ID = id()
+		p.ID = defaultID
+		if p.ID == "" {
+			p.ID = id()
+		}
 		p.Enabled = true
 	} else {
 		p, e = s.endpoint(s.Store.db.QueryRowContext(ctx, "SELECT "+endpointCols+" FROM providers WHERE id=?1", key))
@@ -212,9 +234,6 @@ func (s *Service) configure(ctx context.Context, key string, in ProviderInput) (
 		}
 	}
 	recheck := newRow || in.URL != nil || in.Bearer != nil || in.Network != "" || in.Chain != "" || in.Provider != ""
-	if in.Network == "" {
-		in.Network = in.Chain
-	}
 	if in.Network != "" {
 		p.Network = in.Network
 	}
@@ -248,7 +267,11 @@ func (s *Service) configure(ctx context.Context, key string, in ProviderInput) (
 	}
 	secret := s.box.Seal(nil, nil, bodyJSON(p.secret), []byte(p.ID))
 	if newRow {
-		_, e = s.Store.db.ExecContext(ctx, "INSERT INTO providers(id,provider,network,secret,enabled,height) VALUES(?1,?2,?3,?4,?5,?6)", p.ID, p.Provider, p.Network, secret, p.Enabled, p.Height)
+		insert := "INSERT INTO providers(id,provider,network,secret,enabled,height) VALUES(?1,?2,?3,?4,?5,?6)"
+		if defaultID != "" {
+			insert += " ON CONFLICT(id) DO NOTHING"
+		}
+		_, e = s.Store.db.ExecContext(ctx, insert, p.ID, p.Provider, p.Network, secret, p.Enabled, p.Height)
 	} else {
 		sql := "UPDATE providers SET provider=?2,network=?3,secret=?4,enabled=?5,height=?6,config_version=config_version+1,generation=generation+1"
 		if recheck {

@@ -1,12 +1,12 @@
 # Broadcaster
 
-GM Wallet 的 EVM 与 Solana 已签名交易广播服务。调用方提交签名原文，服务持久化后向最多三家独立付费 RPC 供应商并发广播，并跟踪入块结果。EVM 按外层账户 Nonce 调度；Solana 代付交易在用户和 GM 签齐后立即调度，按交易签名及 recent blockhash 的有效期跟踪。服务使用 Go 和 SQLite，可单机运行。
+GM Wallet 的 EVM 与 Solana 已签名交易广播服务。调用方提交签名原文，服务持久化后向最多三家独立 RPC 供应商并发广播，并跟踪入块结果。EVM 按外层账户 Nonce 调度；Solana 代付交易在用户和 GM 签齐后立即调度，按交易签名及 recent blockhash 的有效期跟踪。服务使用 Go 和 SQLite，可单机运行。
 
 在 EVM 上，签名方自行查询和选取 Nonce、构造交易并签名，也负责签署加价替换版本。Broadcaster 从已签名原文恢复外层发送地址和 Nonce，按账户调度已接收任务。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
 
 ## 运行
 
-需要 Go 1.26.2 或更高版本、本地可写目录和自购 RPC 凭证。以下命令构建服务并在本机启动。配置示例启用以太坊；接入 Solana 时，在 networks 增加集群名、family（solana）、genesisHash 及允许代付的 feePayers 公钥数组。
+需要 Go 1.26.2 或更高版本、本地可写目录和通过准入的 RPC 节点。以下命令构建服务并在本机启动。配置示例启用以太坊；接入 Solana 时，在 networks 增加集群名、family（solana）、genesisHash 及允许代付的 feePayers 公钥数组。
 
 ~~~sh
 go build -o broadcaster ./cmd/broadcaster
@@ -23,7 +23,7 @@ export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
 
 **节点准入。** 管理员向 POST /rpc-providers 提交 network（或 chainId）、providerId、url、可选 bearer。在 EVM 网络附 evmProbes（受控的已签名交易数组），覆盖普通交易、Type 4，以及配置的每个 EntryPoint 的 bundle。Solana 网络附 solanaProbe，结构同 Solana 提交请求。准入会真实发送这些原文，使用专用探测账户和已批准的测试操作。添加成功后响应中的 id 用于 PATCH；仅修改 enabled 无须重新发送探测交易。
 
-**事件和 Scanner。** 在 clients 的相应条目配置 webhook（HTTPS）和 webhookSecret 可启用异步通知，密钥支持环境变量。请求体包含 eventId、event、version、data。接收方使用原始请求体和共享密钥计算 HMAC-SHA256，与 X-Broadcaster-Signature 的十六进制值核对，以 eventId 去重。配置可选 scanner 对象（url、token、networks，例如 {"1":"ethereum"}）可按待处理 EVM 任务维护地址订阅。使用专用消费者令牌，地址活动仅唤醒任务，随后仍由付费 RPC 核实。
+**事件和 Scanner。** 在 clients 的相应条目配置 webhook（HTTPS）和 webhookSecret 可启用异步通知，密钥支持环境变量。请求体包含 eventId、event、version、data。接收方使用原始请求体和共享密钥计算 HMAC-SHA256，与 X-Broadcaster-Signature 的十六进制值核对，以 eventId 去重。配置可选 scanner 对象（url、token、networks，例如 {"1":"ethereum"}）可按待处理 EVM 任务维护地址订阅。使用专用消费者令牌，地址活动仅唤醒任务，随后仍由已准入 RPC 核实。
 
 **实现范围。** EVM 解析受链 ID 保护的 legacy、Type 1、2、4。ERC-4337 支持 Bundler 签好的外层交易。Solana 接收 legacy 和 v0 完整签名交易。7702 逐项确证需要节点的交易前状态跟踪能力；提供方无此能力时保留 UNKNOWN。Solana 历史不完整时保持 CHECKING_EXPIRY，服务不会自行签名。
 
@@ -69,9 +69,9 @@ flowchart TD
 
 发现外层账户的链上 Nonce 已越过本地任务时，逐笔核查候选 Hash。自己的版本入块则正常关闭；证实外部消耗则通知原提交方并重新调度剩余任务；证据不足则暂停该任务重播并继续核查。新区块、ChainScanner 地址活动或节点返回 nonce too low 均可触发核查。查询接口始终可独立从 RPC 读取，无需等待扫描进度。
 
-## 付费 RPC 节点管理
+## RPC 节点管理
 
-每个端点归属于一个稳定的 providerId 和一条链。同一供应商的多个域名、密钥或端点只占一路。每个 EVM 网络使用自己的自购节点池，**该池所有端点必须能广播普通 EVM 交易、EIP-7702 Type 4 交易，以及 ERC-4337 Bundler 签好的外层交易**。4337 外层交易调用目标链的 EntryPoint 合约，经 eth_sendRawTransaction 提交。面向钱包的 eth_sendUserOperation 由独立 Bundler 提供。
+每个端点归属于一个稳定的 providerId 和一条链。同一供应商的多个域名、密钥或端点只占一路。每个 EVM 网络使用独立的节点池，可组合 PublicNode 和自购端点，**该池所有端点必须能广播普通 EVM 交易、EIP-7702 Type 4 交易，以及 ERC-4337 Bundler 签好的外层交易**。4337 外层交易调用目标链的 EntryPoint 合约，经 eth_sendRawTransaction 提交。面向钱包的 eth_sendUserOperation 由独立 Bundler 提供。
 
 | 方法与路径 | 行为 |
 |---|---|
@@ -82,6 +82,27 @@ flowchart TD
 准入须有目标端点和对应凭证的能力证据。例如可使用运维提供的受控已签名测试交易，验证对应写接口接受该类型；费用及链上副作用须在准入测试安排中明确。对 4337，按目标链登记 Bundler 使用的 EntryPoint 地址和版本，核对合约部署，并验证执行端点允许发送有效的、调用该 EntryPoint 的已签名 bundle。查高度成功、能读取历史 Type 4 交易或收到通用参数错误，均不足以证明该端点有 Type 4 广播权限。
 
 Solana 按集群单独建池。准入时用 getGenesisHash 核对集群，验证凭证、sendTransaction 写权限以及交易状态、历史和区块高度查询能力。以 getBlockHeight 和节点进度做读侧健康检查。EVM 和 Solana 共用下述供应商去重、广播熔断、半开试发及恢复规则。
+
+### PublicNode 默认节点
+
+内置以下主网端点。管理员可通过 `GET /rpc-providers/defaults` 查看当前配置网络的默认 URL 和 `mevProtected` 标记；可选 `?network=1` 过滤。EVM 按 chain ID 匹配，Solana 按 mainnet-beta 的 genesis hash 匹配，配置中的集群名称可自定义。保护标记来自供应商对相应 HTTPS RPC 地址的公开说明。[PublicNode 官方端点目录](https://www.publicnode.com/)
+
+| 网络 | HTTPS RPC | 供应商标记 |
+|---|---|---|
+| Ethereum · 1 | `https://ethereum-rpc.publicnode.com` | MEV-Protected |
+| BNB Smart Chain · 56 | `https://bsc-rpc.publicnode.com` | MEV-Protected |
+| Base · 8453 | `https://base-rpc.publicnode.com` | MEV-Protected |
+| Arbitrum One · 42161 | `https://arbitrum-one-rpc.publicnode.com` | MEV-Protected |
+| Solana · mainnet-beta | `https://solana-rpc.publicnode.com` | MEV-Protected |
+| OP Mainnet · 10 | `https://optimism-rpc.publicnode.com` | 普通 RPC |
+| Polygon PoS · 137 | `https://polygon-bor-rpc.publicnode.com` | 普通 RPC |
+| Avalanche C-Chain · 43114 | `https://avalanche-c-chain-rpc.publicnode.com` | 普通 RPC |
+
+**启用。** 向 `POST /rpc-providers` 提交 `providerId: "publicnode"`、目标 `network` 和该链的签名准入探针即可，URL 自动选择。例如以太坊请求体形如 `{"providerId":"publicnode","network":"1","evmProbes":["0x…","0x…","0x…"]}`。首次通过全部检查后进入调度池；重复提交返回原记录。运行中的节点和启停状态可通过 `GET /rpc-providers` 查询。
+
+**启动时自动准入。** 在相应网络配置中将 `publicNodeProbeFile` 指向 JSON 文件，路径相对于配置文件。EVM 文件包含 `evmProbes`，Solana 文件包含 `solanaProbe`，格式与上述准入 API 相同。首次启动使用文件中已获授权的签名原文做真实准入；失败原因写入日志，可更新探针后通过 API 再次准入。重启复用 SQLite 中的记录及人工停用状态。
+
+**选点。** 在启用、健康且允许试发的端点中，优先选择带保护标记的地址，再补齐最多三家独立供应商。每轮 PublicNode 只占一路，冷却时可由其他可用供应商补位。MEV 保护作用于经过该端点的一路提交；同一交易并发发送到普通 RPC 时，仍可能进入公开交易池。
 
 ### 每轮选点
 
@@ -219,7 +240,7 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 
 | 当前状态 | 依据 | 下一步 |
 |---|---|---|
-| READY | 交易已全签并持久化，blockhash 仍有效 | 立即进入 BROADCASTING。对最多三家独立付费供应商并发调用 sendTransaction，发送相同的 base64 原文。两家或一家可用就立即发；零家可用时保持 READY 并继续监测有效期。 |
+| READY | 交易已全签并持久化，blockhash 仍有效 | 立即进入 BROADCASTING。对最多三家独立供应商并发调用 sendTransaction，发送相同的 base64 原文。两家或一家可用就立即发；零家可用时保持 READY 并继续监测有效期。 |
 | BROADCASTING | 一家返回与本地一致的 signature | 进入 TRACKING，收集其他在途响应。RPC 接收只证明已提交；按 signature 查链上结果。 |
 | BROADCASTING / TRACKING | 超时、断连、单节点报 BlockhashNotFound，或只观察到 processed | 继续按原 signature 核查。有效期内按需重播相同字节；拒绝原因按交易或端点归类。单个落后节点的响应不能触发重签。 |
 | 任意未结束状态 | 核实原 signature 在该集群达到 confirmed 或 finalized | 以 INCLUDED 关闭，保存实际 signature 和 slot。按 err 是否为空分别返回 SUCCESS 或 FAILED；执行失败也属于已入块，停止重播及过期重签。 |

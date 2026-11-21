@@ -25,6 +25,7 @@ type Endpoint struct {
 	Network       string     `json:"network"`
 	Enabled       bool       `json:"enabled"`
 	Height        int64      `json:"height"`
+	MEVProtected  bool       `json:"mevProtected"`
 	Healthy       bool       `json:"readHealthy"`
 	Checked       time.Time  `json:"checkedAt"`
 	Progressed    time.Time  `json:"heightAdvancedAt"`

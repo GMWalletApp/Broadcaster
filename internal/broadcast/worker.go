@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -69,23 +70,41 @@ func (s *Service) prepare(ctx context.Context, t Task, token string) ([]dispatch
 		if e != nil {
 			return e
 		}
-		picked := map[string]bool{}
+		var candidates []Endpoint
 		for rows.Next() {
 			p, e := s.endpoint(rows)
 			if e != nil {
 				rows.Close()
 				return e
 			}
-			if !picked[p.Provider] && len(jobs) < 3 {
-				jobs = append(jobs, dispatch{p, id()})
-				picked[p.Provider] = true
-			}
+			candidates = append(candidates, p)
 		}
 		if e = rows.Err(); e != nil {
 			rows.Close()
 			return e
 		}
 		rows.Close()
+		// Keep the random order within each class, then pick distinct providers.
+		slices.SortStableFunc(candidates, func(a, b Endpoint) int {
+			if a.MEVProtected == b.MEVProtected {
+				return 0
+			}
+			if a.MEVProtected {
+				return -1
+			}
+			return 1
+		})
+		picked := map[string]bool{}
+		for _, p := range candidates {
+			if picked[p.Provider] {
+				continue
+			}
+			jobs = append(jobs, dispatch{p, id()})
+			picked[p.Provider] = true
+			if len(jobs) == 3 {
+				break
+			}
+		}
 		round := id()
 		for i := range jobs {
 			j := &jobs[i]
@@ -430,6 +449,7 @@ func wait(ctx context.Context, d time.Duration) bool {
 
 func (s *Service) Run(ctx context.Context) {
 	var wg sync.WaitGroup
+	wg.Go(func() { s.admitConfiguredDefaults(ctx) })
 	wg.Go(func() {
 		for ctx.Err() == nil {
 			s.health(ctx)
