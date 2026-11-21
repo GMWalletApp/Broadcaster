@@ -231,6 +231,11 @@ func (s *Store) submit(ctx context.Context, t Task, v Version) (Task, bool, erro
 			known, err := find(ctx, tx, t.Owner, t.Family, t.Network, v.Hash)
 			if err == nil {
 				t = known
+				if t.Family == Tron && t.State != "CLOSED" && t.State != "CONFIRMING" {
+					var err error
+					created, err = refreshTronSignatures(ctx, tx, &t, v)
+					return err
+				}
 				return nil
 			}
 			if err != notFound {

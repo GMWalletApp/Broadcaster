@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -42,6 +43,7 @@ type evmBlock struct {
 	Hash          string            `json:"hash"`
 	Height        string            `json:"number"`
 	Transactions  []json.RawMessage `json:"transactions"`
+	BaseFee       *hexutil.Big      `json:"baseFeePerGas"`
 	ConsumerIndex uint64            `json:"-"`
 }
 
@@ -385,6 +387,15 @@ func (s *Service) observeEVM(ctx context.Context, p Endpoint, t *Task) (update, 
 		v := &t.Versions[i]
 		if v.Hash == t.Active {
 			s.diagnose(ctx, p, v, t.Sender, head.Height, false)
+			// A suggested gas price includes a discretionary tip. Only the base fee
+			// proves that the signed fee cap is currently too low for inclusion.
+			if !t.Force && head.BaseFee != nil && time.Since(t.Created) > 2*time.Minute {
+				var signed types.Transaction
+				raw, err := hexutil.Decode(v.Raw)
+				if err == nil && signed.UnmarshalBinary(raw) == nil && signed.GasFeeCap().Cmp(head.BaseFee.ToInt()) < 0 {
+					return update{state: "TRACKING", reason: "REPLACEMENT_REQUIRED", bump: true}, nil
+				}
+			}
 		}
 	}
 	return update{state: "TRACKING", send: true}, nil

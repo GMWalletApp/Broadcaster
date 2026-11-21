@@ -46,95 +46,6 @@ func solIncluded(hash string, status *solObservation) update {
 	return u
 }
 
-type historyCursor struct {
-	Slot      uint64 `json:"slot"`
-	Expected  string `json:"expectedBlockhash"`
-	Signature string `json:"signature"`
-	Root      uint64 `json:"rootSlot"`
-}
-
-// A submission accepted during an outage may carry an inflated expiry. A fresh
-// finalized blockhash gives an independent upper bound for an older context.
-func (s *Service) impossibleExpiry(ctx context.Context, p Endpoint, v Version) bool {
-	var head struct {
-		Context struct {
-			Slot uint64 `json:"slot"`
-		} `json:"context"`
-		Value struct {
-			Hash      string `json:"blockhash"`
-			LastValid uint64 `json:"lastValidBlockHeight"`
-		} `json:"value"`
-	}
-	params := []any{map[string]any{"commitment": "finalized", "minContextSlot": v.ContextSlot}}
-	return s.call(ctx, p, "getLatestBlockhash", params, &head) == nil && head.Context.Slot >= v.ContextSlot && head.Value.Hash != "" && head.Value.LastValid > 0 && head.Value.LastValid < v.LastValid
-}
-
-func (s *Service) solExpiry(ctx context.Context, p Endpoint, t *Task, v Version) (update, error) {
-	checking := update{state: "CHECKING_EXPIRY", reason: "VERIFYING_HISTORY", evidence: t.Evidence}
-	var height uint64
-	if e := s.call(ctx, p, "getBlockHeight", []any{map[string]any{"commitment": "finalized", "minContextSlot": v.ContextSlot}}, &height); e != nil {
-		return checking, nil
-	}
-	inflated := height <= v.LastValid
-	if inflated && !s.impossibleExpiry(ctx, p, v) {
-		return checking, nil
-	}
-	var valid struct {
-		Value *bool `json:"value"`
-	}
-	if e := s.call(ctx, p, "isBlockhashValid", []any{v.Blockhash, map[string]any{"commitment": "finalized", "minContextSlot": v.ContextSlot}}, &valid); e != nil || valid.Value == nil || *valid.Value {
-		return checking, nil
-	}
-	// Walk the finalized parent chain, including skipped slots, down to the
-	// actual signed blockhash. A null status alone cannot prove non-inclusion.
-	var cur historyCursor
-	if json.Unmarshal(t.Evidence, &cur) != nil || cur.Signature != v.Hash || cur.Expected == "" || cur.Root == 0 {
-		cur = historyCursor{Signature: v.Hash}
-		if e := s.call(ctx, p, "getSlot", []any{map[string]any{"commitment": "finalized", "minContextSlot": v.ContextSlot}}, &cur.Slot); e != nil || cur.Slot < v.ContextSlot {
-			return checking, nil
-		}
-		cur.Root = cur.Slot
-	}
-	for range 12 {
-		var block *struct {
-			Hash       string   `json:"blockhash"`
-			Prev       string   `json:"previousBlockhash"`
-			Parent     uint64   `json:"parentSlot"`
-			Height     *uint64  `json:"blockHeight"`
-			Signatures []string `json:"signatures"`
-		}
-		e := s.call(ctx, p, "getBlock", []any{cur.Slot, map[string]any{"transactionDetails": "signatures", "rewards": false, "commitment": "finalized", "maxSupportedTransactionVersion": 0}}, &block)
-		if e != nil || block == nil || block.Hash == "" || block.Signatures == nil || block.Height == nil || cur.Expected != "" && block.Hash != cur.Expected {
-			return checking, nil
-		}
-		if cur.Expected == "" && (!inflated && *block.Height <= v.LastValid || inflated && *block.Height < height) {
-			return checking, nil
-		}
-		for _, sig := range block.Signatures {
-			if sig == v.Hash {
-				if status := s.solExecution(ctx, p, sig, cur.Slot, "finalized"); status != nil {
-					return solIncluded(sig, status), nil
-				}
-				u := included(sig, "PENDING", map[string]any{"slot": cur.Slot, "blockhash": block.Hash})
-				u.finalized, u.slot = true, cur.Slot
-				return u, nil
-			}
-		}
-		if block.Hash == v.Blockhash || v.OriginSlot > 0 && cur.Slot <= v.OriginSlot {
-			return update{state: "RESIGN_REQUIRED", reason: "BLOCKHASH_EXPIRED", rootSlot: cur.Root, evidence: bodyJSON(map[string]any{"signature": v.Hash, "blockhash": v.Blockhash, "finalizedHeight": height, "historyFloorSlot": cur.Slot, "rootSlot": cur.Root, "verifiedOriginSlot": v.OriginSlot})}, nil
-		}
-		if cur.Slot == 0 || block.Parent >= cur.Slot || block.Prev == "" || v.OriginSlot == 0 && cur.Slot < v.ContextSlot && v.ContextSlot-cur.Slot > 1024 {
-			checking.reason = "BLOCKHASH_ORIGIN_UNVERIFIED"
-			return checking, nil
-		}
-		cur.Slot = block.Parent
-		cur.Expected = block.Prev
-		checking.evidence = bodyJSON(cur)
-		checking.advanced = true
-	}
-	return checking, nil
-}
-
 // Finalized block history may keep the signature after the status index is pruned.
 func (s *Service) solExecution(ctx context.Context, p Endpoint, hash string, slot uint64, commitment string) *solObservation {
 	var tx *struct {
@@ -151,17 +62,52 @@ func (s *Service) solExecution(ctx context.Context, p Endpoint, hash string, slo
 	return &solObservation{Slot: slot, Commitment: commitment, Error: tx.Meta.Error}
 }
 
+type solanaInclusion struct {
+	Slot       uint64          `json:"slot"`
+	Commitment string          `json:"confirmationStatus"`
+	Blockhash  string          `json:"blockhash"`
+	History    json.RawMessage `json:"historyCursor"`
+}
+
+func (p solanaInclusion) finalized() bool { return p.Commitment == "finalized" || p.Blockhash != "" }
+
+// Preserve the inclusion observation while a multi-round scan checks whether
+// a confirmed fork was displaced. Only a complete finalized exclusion proof
+// covering the previously observed slot can release the payment for signing.
+func reconcileSolanaConfirmation(t *Task, next update) update {
+	pending := update{state: t.State, reason: t.Reason, winner: t.Winner, execution: t.Execution, evidence: t.Evidence}
+	var prior solanaInclusion
+	if json.Unmarshal(t.Evidence, &prior) != nil || prior.finalized() || prior.Slot == 0 || t.Winner != t.Active {
+		return pending
+	}
+	if next.state == "RESIGN_REQUIRED" && next.rootSlot >= prior.Slot {
+		return next
+	}
+	if next.state == "CHECKING_EXPIRY" || next.state == "RESIGN_REQUIRED" {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(t.Evidence, &fields) != nil || fields == nil {
+			return pending
+		}
+		switch {
+		case next.advanced:
+			fields["historyCursor"] = next.evidence
+		case next.state == "RESIGN_REQUIRED" || next.reason == "CONFLICTING_HISTORY":
+			delete(fields, "historyCursor")
+		}
+		pending.evidence = bodyJSON(fields)
+	}
+	return pending
+}
+
 func (s *Service) observeSolana(ctx context.Context, p Endpoint, t *Task) (update, error) {
 	if t.State == "CONFIRMING" {
-		var proof struct {
-			Slot       uint64
-			Blockhash  string
-			Commitment string `json:"confirmationStatus"`
-		}
-		if json.Unmarshal(t.Evidence, &proof) == nil && (proof.Blockhash != "" || proof.Commitment == "finalized") && proof.Slot > 0 {
+		var proof solanaInclusion
+		if json.Unmarshal(t.Evidence, &proof) == nil && proof.Slot > 0 {
 			if status := s.solExecution(ctx, p, t.Winner, proof.Slot, "finalized"); status != nil {
 				return solIncluded(t.Winner, status), nil
 			}
+		}
+		if proof.finalized() && proof.Slot > 0 {
 			if status, err := s.solStatus(ctx, p, t.Winner); err == nil && status != nil && status.Slot == proof.Slot && status.Commitment == "finalized" && len(status.Error) > 0 {
 				return solIncluded(t.Winner, status), nil
 			}

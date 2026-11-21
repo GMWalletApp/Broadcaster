@@ -1,19 +1,45 @@
+<p align="center"><img src="https://github.com/GMWalletApp.png?size=96" width="80" height="80" alt="GM Wallet"></p>
 <h1 align="center">Broadcaster</h1>
-<p align="center">管理 18 条主网上已签名交易的完整生命周期，将结果回传给提交交易的服务。</p>
+<p align="center"><strong>提交已签名交易，由 Broadcaster 广播、跟踪并将链上结果回传给提交服务。</strong></p>
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
-<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">MIT</a></p>
+<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">MIT</a> · 18 条主网</p>
+<p align="center"><a href="#快速开始">快速开始</a> · <a href="#支持的网络">支持的网络</a> · <a href="docs/api.zh-CN.md">接口文档</a></p>
 
-[提交一笔交易](#提交一笔以太坊交易) · [部署服务](docs/api.zh-CN.md#运行) · [支持的网络](#支持的网络) · [接口文档](docs/api.zh-CN.md)
+---
 
-## 为什么做 Broadcaster
+## 一笔付款如何处理
 
-付款服务提交一笔签好的交易后，即使 RPC 超时，也需要知道这笔付款最终有没有上链。Broadcaster 接手后把签名原文存入 SQLite，向最多三家独立供应商并发广播，并持续核查入块和执行结果。进程重启后会接着处理原任务。
+钱包或支付服务签好交易后提交一次。Broadcaster 将签名原文存入 SQLite，向最多三家独立 RPC 供应商并发广播，再核实哪一笔交易入块。即使节点接收后响应超时，后台仍按原哈希核查，重启后接着处理。
 
-接入时，为提交方配置 HTTPS 回调地址（`clients[].webhook`）和签名密钥（`webhookSecret`）。任务结束时，Broadcaster 会主动把 `transaction.closed` 事件发回该服务。提交方据此更新订单或通知用户；回调投递失败时，Broadcaster 会重试。[回调签名与事件](docs/api.zh-CN.md#故障恢复与上游事件)
+EVM 转账按已提交任务的 Nonce 调度，替换后继续跟踪新旧哈希。Solana 代付由用户和代付方对同一消息签名；blockhash 过期时，Broadcaster 查完最终确定的区块历史，才通知上游重签。
 
-## 提交一笔以太坊交易
+## 快速开始
 
-先按部署指南启动服务并为以太坊启用一个节点。下面的例子使用 `curl` 和 `jq`。将 `SIGNED_TX` 设为钱包已经签好、准备发往以太坊主网的十六进制交易原文，`BROADCASTER_API_TOKEN` 使用部署时设置的业务令牌。[部署服务](docs/api.zh-CN.md#运行) · [启用 PublicNode](docs/api.zh-CN.md#内置主网节点)
+### 1. 配置服务
+
+以下示例需要 Go 1.26.2+、OpenSSL、curl 和 jq。在仓库根目录构建服务并复制以太坊示例配置。以下凭证只需生成一次，重启时继续使用同一组。
+
+```sh
+go build -o broadcaster ./cmd/broadcaster
+cp config.example.json config.json
+export BROADCASTER_API_TOKEN="$(openssl rand -hex 32)"
+export BROADCASTER_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
+```
+
+要接收回调，在 config.json 的 wallet 客户端填写 HTTPS 接收地址 `webhook`，并为 `webhookSecret` 配置至少 24 字节的独立密钥。将凭证保存在私有部署配置中。 [配置字段](docs/api.zh-CN.md#运行)
+
+### 2. 启用节点并启动服务
+
+将获准在主网发送的签名探针放入 `probes/1.json`。启动时服务核对链并真实广播探针，通过后该节点才能处理业务交易。也可在启动后用管理令牌登记节点。 [探针格式与节点准入](docs/api.zh-CN.md#rpc-节点管理)
+
+```sh
+./broadcaster -config config.json -db broadcaster.db
+```
+
+### 3. 提交已签名转账
+
+在另一个终端加载同一业务令牌，将十六进制签名原文放入 `SIGNED_TX`。把返回的哈希和对应付款单一起保存。
 
 ```sh
 BASE=http://127.0.0.1:8080
@@ -24,57 +50,38 @@ TX_HASH=$(jq -n --arg raw "$SIGNED_TX" '{rawTransaction: $raw}' |
   jq -er '.txHash')
 ```
 
-首次提交返回 HTTP 202，表示 Broadcaster 已受理并保存任务。节点接收交易后，Broadcaster 继续跟踪。成功路径的结束回调包含以下字段（节选）。
+## 接收交易结果
 
-```json
-{
-  "event": "transaction.closed",
-  "data": {
-    "taskState": "CLOSED",
-    "taskOutcome": "INCLUDED",
-    "executionStatus": "SUCCESS"
-  }
-}
-```
+HTTP 202 表示任务已保存。配置回调后，任务结束时原提交服务会收到已签名的 `transaction.closed` 事件。根据任务结果与执行状态更新订单。
 
-| 提交方看到的结果 | 含义 |
+| 可见状态 | 业务含义 |
 |---|---|
-| `CONFIRMING`，`executionStatus=PENDING` | 已看到入块，正在等执行回执。Broadcaster 自动复查，付款继续显示「确认中」。 |
-| `CLOSED / INCLUDED`，`executionStatus=SUCCESS` | 已核实入块和执行成功。 |
-| `CLOSED / INCLUDED`，`executionStatus=FAILED` | 链上执行失败。读 `reason` 区分 Gas 耗尽、合约回退等原因，`evidence` 提供节点可用的诊断信息。 |
-| 提交返回 `409 NONCE_CONFLICT`，或某节点广播记录为 `REJECTED` | 前者表示本地 Nonce 已占用。后者查看该节点的 `reason`，例如费用过低、TRON 多签权重不足或签名账户无权限。 |
+| `CONFIRMING` + `PENDING` | 已看到入块，正在核实执行结果，付款继续显示「确认中」。 |
+| `INCLUDED` + `SUCCESS` | 已核实执行成功。需要更多确认数的业务继续按自己的结算规则处理。 |
+| `INCLUDED` + `FAILED` | 已入块但执行失败，从 `reason` 和 `evidence` 读取原因。 |
+| `REPLACED_EXTERNALLY` / `EXPIRED` | 外部交易已占用 Nonce，或本地跟踪到期。再次付款前先核对原任务。 |
 
-回调接收方按 `eventId` 去重。排查进度或补查结果时，可用提交时返回的哈希查询。[失败原因和回调字段](docs/api.zh-CN.md#如何判断失败原因)
+接收方验证回调签名，持久化事件，并按 `eventId` 去重。需要补查时，用提交时返回的哈希查询。 [回调格式、重试与乱序](docs/api.zh-CN.md#故障恢复与上游事件)
 
 ```sh
 curl -fsS "$BASE/EVM/transactions/$TX_HASH?chainId=1" \
   -H "Authorization: Bearer $BROADCASTER_API_TOKEN" |
-  jq '{taskState, taskOutcome, executionStatus}'
+  jq '{taskState, taskOutcome, executionStatus, reason}'
 ```
-
-如果付款需要等待多个确认，业务方按自己的结算规则继续等待。[完整状态机](docs/api.zh-CN.md#evm-交易生命周期)
 
 ## 支持的网络
 
-| 主网 | 提交入口 | 接口文档 |
-|---|---|---|
-| Ethereum、Arbitrum One、BNB Smart Chain、Avalanche C-Chain、Polygon PoS、OP Mainnet、Base、HyperEVM、Monad、Arc、Plasma、Robinhood Chain | `POST /EVM/transactions` | [EVM](docs/api.zh-CN.md#evm-调用方接口) |
-| Solana | `POST /solana/transactions` | [Solana](docs/api.zh-CN.md#solana-代付交易) |
-| Bitcoin、TRON、Aptos、Sui、TON | `POST /networks/{network}/transactions` | [Bitcoin · TRON · Aptos · Sui · TON](docs/api.zh-CN.md#非-evm-调用方接口) |
-
-EVM 签名前可以查询推荐 nonce。比如链上返回 20，队列已占用 20、21、23，服务会推荐 22。Solana 代付时，用户和代付方先签署同一份消息；如果 blockhash 过期，服务会核查原交易是否入块，再决定是否要求重签。[EVM nonce 与替换](docs/api.zh-CN.md#evm-nonce-查询与任务排序) · [Solana 代付](docs/api.zh-CN.md#solana-代付交易) · [其他五条链的签名格式](docs/api.zh-CN.md#原生链广播接口)
-
-## 生产环境怎么配节点
-
-18 条主网各内置一家供应商。通过准入后，每轮向最多三家健康供应商并发广播。部署时可私下登记额外的付费节点。
-
-| 主网 | 内置供应商与地址 |
+| 主网 | 提交入口 |
 |---|---|
-| 其余 15 条主网 | PublicNode |
-| Monad | Monad Foundation · `https://rpc-mainnet.monadinfra.com` |
-| Plasma | Plasma 官方 RPC · `https://rpc.plasma.to` |
-| TON | TON Center · `https://toncenter.com`，v2 广播、v3 查询 |
+| Ethereum · Arbitrum One · BNB Smart Chain · Avalanche C-Chain · Polygon PoS · OP Mainnet · Base · HyperEVM · Monad · Arc · Plasma · Robinhood Chain | `POST /EVM/transactions` |
+| Solana | `POST /solana/transactions` |
+| Bitcoin · TRON · Aptos · Sui · TON | `POST /networks/{network}/transactions` |
 
-这三个公开端点均有限流。Monad Foundation 将其公开端点列为开发用途，生产部署请选用承载生产流量的供应商。[Monad 主网说明](https://docs.monad.xyz/developer-essentials/network-information)
+每条主网内置一家供应商。15 条使用 PublicNode，Monad 使用 Monad Foundation，Plasma 使用官方公共 RPC，TON 使用 TON Center。生产环境可私下登记其他独立供应商。调度器优先选择标有 MEV-Protected 的路由；同时发往普通交易池的那一份仍会公开。 [18 链配置](config.mainnets.json) · [节点目录与限制](docs/api.zh-CN.md#rpc-节点管理)
 
-调度器优先使用标有 MEV-Protected 的端点。如果同一笔交易也发给普通 RPC，该副本仍可能进入公开交易池。[PublicNode 端点和保护标记](docs/api.zh-CN.md#内置主网节点) · [18 条主网配置](config.mainnets.json)
+## 接入文档
+
+- [EVM 提交、Nonce、强制广播与替换](docs/api.zh-CN.md#evm-调用方接口)
+- [Solana 代付和五条原生链的签名格式](docs/api.zh-CN.md#非-evm-调用方接口)
+- [任务状态、执行失败与恢复](docs/api.zh-CN.md#evm-交易生命周期)
+- [节点准入、熔断与部署](docs/api.zh-CN.md#rpc-节点管理)

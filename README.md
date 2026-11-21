@@ -1,19 +1,45 @@
+<p align="center"><img src="https://github.com/GMWalletApp.png?size=96" width="80" height="80" alt="GM Wallet"></p>
 <h1 align="center">Broadcaster</h1>
-<p align="center">Manage signed transactions across 18 mainnets and report the outcome to the service that submitted each one.</p>
+<p align="center"><strong>Submit a signed transaction and receive its on-chain result in your service.</strong></p>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
-<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">MIT</a></p>
+<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">MIT</a> · 18 mainnets</p>
+<p align="center"><a href="#quick-start">Quick start</a> · <a href="#networks">Networks</a> · <a href="docs/api.md">API reference</a></p>
 
-[Submit a transaction](#submit-an-ethereum-transaction) · [Run locally](#run-locally) · [Networks](#supported-networks) · [API reference (中文)](docs/api.zh-CN.md)
+---
 
-## Why Broadcaster exists
+## What happens to a payment
 
-A payment service needs to know what happened to a transfer even if an RPC times out. Once it accepts the signed transaction, Broadcaster saves it in SQLite, sends it to up to three independent providers and tracks inclusion and execution. It resumes outstanding tasks after a restart.
+Your wallet or payment service signs a transaction and submits it once. Broadcaster saves the signed bytes in SQLite, sends them through up to three independent RPC providers, and checks what landed. A node can time out after accepting a transaction. The worker keeps checking the original hash and resumes after a restart.
 
-Configure the submitting service’s HTTPS callback URL (`clients[].webhook`) and signing secret (`webhookSecret`). When the task ends, Broadcaster sends a signed `transaction.closed` event back to that service so it can update the order or notify the user. Broadcaster retries failed deliveries. [Callback signing and events (中文)](docs/api.zh-CN.md#故障恢复与上游事件)
+For an EVM transfer, Broadcaster coordinates submitted nonces and watches every signed replacement. For a sponsored Solana payment, the user and fee payer sign the same message. If the blockhash expires, Broadcaster checks finalized history before asking for new signatures.
 
-## Submit an Ethereum transaction
+## Quick start
 
-Start the service and enable an Ethereum provider first. The example uses `curl`, `jq` and your business API token. Set `SIGNED_TX` to a hex-encoded transaction signed for Ethereum mainnet that you intend to broadcast. [Run locally](#run-locally)
+### 1. Configure the service
+
+The examples use Go 1.26.2+, OpenSSL, curl and jq. From the repository root, build the server and copy the Ethereum example. Generate the credentials once and retain them for restarts.
+
+```sh
+go build -o broadcaster ./cmd/broadcaster
+cp config.example.json config.json
+export BROADCASTER_API_TOKEN="$(openssl rand -hex 32)"
+export BROADCASTER_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
+```
+
+To receive callbacks, set the wallet client’s `webhook` to your HTTPS receiver and `webhookSecret` to a separate secret of at least 24 bytes. Save them in your private deployment configuration. [Configuration](docs/api.md#setup)
+
+### 2. Enable a provider and start the worker
+
+Put authorized, signed admission probes in `probes/1.json`. Startup checks the chain and broadcasts these probes on mainnet. A provider that passes becomes eligible for wallet traffic. You can also register one later with the admin token. [Probe format and provider setup](docs/api.md#providers)
+
+```sh
+./broadcaster -config config.json -db broadcaster.db
+```
+
+### 3. Submit a signed transfer
+
+In a second shell with the same business token, set `SIGNED_TX` to the hex-encoded signed transaction. Save the returned hash against your payment.
 
 ```sh
 BASE=http://127.0.0.1:8080
@@ -24,72 +50,38 @@ TX_HASH=$(jq -n --arg raw "$SIGNED_TX" '{rawTransaction: $raw}' |
   jq -er '.txHash')
 ```
 
-HTTP 202 acknowledges that Broadcaster has accepted and saved the task. Tracking continues after an RPC accepts the transaction. A successful completion callback includes the following fields.
+## Receive the result
 
-```json
-{
-  "event": "transaction.closed",
-  "data": {
-    "taskState": "CLOSED",
-    "taskOutcome": "INCLUDED",
-    "executionStatus": "SUCCESS"
-  }
-}
-```
+HTTP 202 means the task was saved. With a callback configured, the submitting service receives a signed `transaction.closed` event when the task ends. Use the two result fields to decide how to update the order.
 
 | Result | Meaning |
 |---|---|
-| `CONFIRMING`, `executionStatus=PENDING` | Inclusion observed. Broadcaster polls for the execution result. Show the payment as confirming. |
-| `CLOSED / INCLUDED`, `executionStatus=SUCCESS` | Inclusion and successful execution verified. |
-| `CLOSED / INCLUDED`, `executionStatus=FAILED` | Read `reason` for the cause (for example, out of gas or a contract revert) and `evidence` for available diagnostics. |
-| HTTP `409 NONCE_CONFLICT` at intake, or a `REJECTED` delivery | The nonce is already in the local queue, or an individual node refused the transaction. Each refused delivery has its own `reason`, including fee and TRON signature permission errors. |
+| `CONFIRMING` + `PENDING` | Inclusion observed. Keep the payment open while the worker checks execution. |
+| `INCLUDED` + `SUCCESS` | Execution succeeded. Apply any additional settlement confirmations your service requires. |
+| `INCLUDED` + `FAILED` | Execution failed. Read `reason` and `evidence` for the available cause. |
+| `REPLACED_EXTERNALLY` / `EXPIRED` | An external transaction consumed the nonce, or local tracking reached its deadline. Reconcile the payment before sending again. |
 
-Deduplicate callbacks by `eventId`. Use the returned transaction hash to inspect progress or reconcile a result. [Failure reasons (中文)](docs/api.zh-CN.md#如何判断失败原因)
+Verify the callback signature, persist the event and deduplicate by `eventId`. To reconcile a missed notification, query the original hash. [Webhook contract](docs/api.md#webhooks-and-recovery)
 
 ```sh
 curl -fsS "$BASE/EVM/transactions/$TX_HASH?chainId=1" \
   -H "Authorization: Bearer $BROADCASTER_API_TOKEN" |
-  jq '{taskState, taskOutcome, executionStatus}'
+  jq '{taskState, taskOutcome, executionStatus, reason}'
 ```
 
-If settlement requires additional confirmations, the application waits for them according to its own policy.
+## Networks
 
-## Run locally
-
-The example configuration starts an Ethereum service. Generate the two tokens and storage key once and save them for restarts.
-
-```sh
-go build -o broadcaster ./cmd/broadcaster
-cp config.example.json config.json
-export BROADCASTER_API_TOKEN="$(openssl rand -hex 32)"
-export BROADCASTER_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export BROADCASTER_STORAGE_KEY="$(openssl rand -base64 32)"
-./broadcaster -config config.json -db broadcaster.db
-```
-
-To enable the bundled Ethereum endpoint, put the signed admission probes in `probes/1.json` before startup, or register the provider later through the admin API. Admission broadcasts those probes on mainnet. [Probe format and provider setup (中文)](docs/api.zh-CN.md#内置主网节点)
-
-## Supported networks
-
-| Mainnets | Submit to | API reference |
-|---|---|---|
-| Ethereum, Arbitrum One, BNB Smart Chain, Avalanche C-Chain, Polygon PoS, OP Mainnet, Base, HyperEVM, Monad, Arc, Plasma, Robinhood Chain | `POST /EVM/transactions` | [EVM](docs/api.zh-CN.md#evm-调用方接口) |
-| Solana | `POST /solana/transactions` | [Solana](docs/api.zh-CN.md#solana-代付交易) |
-| Bitcoin, TRON, Aptos, Sui, TON | `POST /networks/{network}/transactions` | [Bitcoin · TRON · Aptos · Sui · TON](docs/api.zh-CN.md#非-evm-调用方接口) |
-
-On EVM, a signer can ask for the next available nonce. If the chain returns 20 and the queue holds 20, 21 and 23, Broadcaster suggests 22. On Solana, the user and fee payer sign the same message. If the blockhash expires, Broadcaster checks the original transaction’s history before requesting new signatures. [EVM nonce guide (中文)](docs/api.zh-CN.md#evm-nonce-查询与任务排序) · [Solana sponsorship (中文)](docs/api.zh-CN.md#solana-代付交易) · [Native transaction formats (中文)](docs/api.zh-CN.md#原生链广播接口)
-
-## Production providers
-
-Each of the 18 mainnets has one preset. After admission, Broadcaster sends through up to three independent healthy providers per round. Register additional providers privately for production.
-
-| Network | Bundled provider |
+| Mainnets | Submission endpoint |
 |---|---|
-| 15 mainnets | PublicNode |
-| Monad | Monad Foundation · `https://rpc-mainnet.monadinfra.com` |
-| Plasma | Plasma public RPC · `https://rpc.plasma.to` |
-| TON | TON Center · `https://toncenter.com` (v2 writes and v3 lookups) |
+| Ethereum · Arbitrum One · BNB Smart Chain · Avalanche C-Chain · Polygon PoS · OP Mainnet · Base · HyperEVM · Monad · Arc · Plasma · Robinhood Chain | `POST /EVM/transactions` |
+| Solana | `POST /solana/transactions` |
+| Bitcoin · TRON · Aptos · Sui · TON | `POST /networks/{network}/transactions` |
 
-The three public endpoints are rate-limited. Monad Foundation designates its public endpoint for development. [Monad network information](https://docs.monad.xyz/developer-essentials/network-information)
+Each mainnet has one preset. Fifteen use PublicNode. Monad uses Monad Foundation, Plasma uses its public RPC, and TON uses TON Center. Register additional independent providers privately. Routes marked MEV-Protected are selected first. Sending the same bytes to a public mempool also exposes that copy. [Mainnet configuration](config.mainnets.json) · [Provider catalog and limits](docs/api.md#providers)
 
-Broadcaster prefers MEV-Protected endpoints. If a transaction also goes to an ordinary RPC, that copy can reach the public mempool. [PublicNode routes and protection labels (中文)](docs/api.zh-CN.md#内置主网节点) · [18-network configuration](config.mainnets.json)
+## Integration reference
+
+- [EVM transactions, nonce queries, force and replacement](docs/api.md#evm-api)
+- [Solana sponsorship and the five native transaction formats](docs/api.md#non-evm-api)
+- [Lifecycle states, execution failures and recovery](docs/api.md#lifecycle)
+- [Provider admission, circuit breakers and deployment](docs/api.md#providers)

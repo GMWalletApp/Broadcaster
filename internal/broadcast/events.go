@@ -11,6 +11,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -52,33 +53,44 @@ func (s *Service) deliverOne(ctx context.Context, c Client) (bool, error) {
 	req.Header.Set("Idempotency-Key", n.ID)
 	resp, e := s.http.Do(req)
 	ok := false
+	var retryAfter string
 	if e == nil {
 		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			retryAfter = resp.Header.Get("Retry-After")
+		}
 		ok = resp.StatusCode >= 200 && resp.StatusCode < 300
 	}
 	if ok {
 		_, e = s.Store.db.ExecContext(ctx, "UPDATE outbox SET sent=?,token=NULL WHERE id=? AND token=?", time.Now().UnixMilli(), n.ID, token)
 	} else {
-		backoff := time.Second << min(attempts, 10)
+		backoff := webhookRetryDelay(attempts, retryAfter, time.Now())
 		_, e = s.Store.db.ExecContext(ctx, "UPDATE outbox SET due=?,token=NULL WHERE id=? AND token=?", time.Now().Add(backoff).UnixMilli(), n.ID, token)
 	}
 	return true, e
 }
 
-func (s *Service) notifications(ctx context.Context) {
+// Retry-After may be seconds or an HTTP date. Bound untrusted delays so a bad
+// receiver clock cannot strand a durable event indefinitely.
+func webhookRetryDelay(attempts int, hint string, now time.Time) time.Duration {
+	delay := time.Second << min(attempts, 10)
+	const limit = 24 * time.Hour
+	if seconds, err := strconv.ParseUint(hint, 10, 64); err == nil {
+		return max(delay, time.Duration(min(seconds, uint64(limit/time.Second)))*time.Second)
+	}
+	if at, err := http.ParseTime(hint); err == nil {
+		return max(delay, min(limit, at.Sub(now)))
+	}
+	return delay
+}
+
+func (s *Service) notifications(ctx context.Context, c Client) {
 	for ctx.Err() == nil {
-		worked := false
-		for _, c := range s.cfg.Clients {
-			if c.Webhook == "" {
-				continue
-			}
-			ok, e := s.deliverOne(ctx, c)
-			worked = worked || ok
-			if e != nil && ctx.Err() == nil {
-				slog.Warn("notification delivery deferred", "client", c.Name, "error", e)
-			}
+		worked, err := s.deliverOne(ctx, c)
+		if err != nil && ctx.Err() == nil {
+			slog.Warn("notification delivery deferred", "client", c.Name, "error", err)
 		}
-		if !worked && !wait(ctx, time.Second) {
+		if (!worked || err != nil) && !wait(ctx, time.Second) {
 			return
 		}
 	}

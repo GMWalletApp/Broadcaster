@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS outbox (
  token text, attempts int NOT NULL DEFAULT 0, UNIQUE(task,name,revision)
 );
 CREATE INDEX IF NOT EXISTS outbox_due ON outbox(due) WHERE sent IS NULL;
+CREATE INDEX IF NOT EXISTS outbox_owner_due ON outbox(owner_id,due) WHERE sent IS NULL;
 CREATE TABLE IF NOT EXISTS force_audit (
  task text NOT NULL REFERENCES tasks(id), actor text NOT NULL, reason text NOT NULL, created integer NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000 AS INTEGER))
 );

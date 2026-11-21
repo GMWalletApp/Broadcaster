@@ -29,7 +29,7 @@ func rejectionReason(f Family, detail string) string {
 			return "INTRINSIC_GAS_TOO_LOW"
 		case strings.Contains(msg, "insufficient funds"):
 			return "INSUFFICIENT_FUNDS"
-		case strings.Contains(msg, "underpriced"), strings.Contains(msg, "less than block base fee"):
+		case strings.Contains(msg, "underpriced"), strings.Contains(msg, "less than block base fee"), strings.Contains(msg, "gas price too low"), strings.Contains(msg, "gas price below configured minimum"):
 			return "FEE_TOO_LOW"
 		case strings.Contains(msg, "invalid sender"):
 			return "INVALID_SENDER"

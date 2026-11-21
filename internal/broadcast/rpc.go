@@ -154,9 +154,17 @@ func classify(err error) sendResult {
 	if !errors.As(err, &rpc) {
 		return sendResult{"UNKNOWN", err.Error(), true}
 	}
-	msg := strings.ToLower(rpc.Message)
-	if msg == "already known" || msg == "known transaction" || (strings.Contains(msg, "already processed") || strings.Contains(msg, "already been processed") || strings.Contains(msg, "alreadyprocessed")) {
+	msg := strings.TrimSpace(strings.ToLower(rpc.Message))
+	// Match node acknowledgements exactly. Contract revert strings can contain
+	// the same words and are not evidence that the node accepted the bytes.
+	switch msg {
+	case "already known", "alreadyknown", "already known transaction", "known transaction",
+		"alreadyprocessed", "already processed", "this transaction has already been processed",
+		"transaction simulation failed: this transaction has already been processed":
 		return sendResult{state: "ALREADY_KNOWN", detail: err.Error()}
+	}
+	if strings.HasPrefix(msg, "execution reverted") || strings.HasPrefix(msg, "transaction simulation failed:") {
+		return sendResult{"REJECTED", err.Error(), false}
 	}
 	for _, term := range []string{"rate limit", "too many requests", "unauthorized", "forbidden", "node is unhealthy", "service unavailable", "internal error", "timed out", "timeout", "connection reset", "bad gateway", "node is behind", "invalid api key", "invalid api-key", "access denied", "quota exceeded"} {
 		if strings.Contains(msg, term) {
@@ -183,6 +191,15 @@ func (s *Service) send(ctx context.Context, p Endpoint, f Family, v Version) sen
 	err := s.call(ctx, p, method, params, &got)
 	if err == nil && got != v.Hash {
 		err = &transportError{"RPC returned unexpected transaction identifier"}
+	}
+	var rpc *rpcError
+	if f == EVM && errors.As(err, &rpc) {
+		switch rpc.Code {
+		case 1000:
+			return sendResult{"ALREADY_KNOWN", err.Error(), false}
+		case -32002, -32004:
+			return sendResult{"UNKNOWN", err.Error(), true}
+		}
 	}
 	return classify(err)
 }
