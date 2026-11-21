@@ -2,7 +2,7 @@
 
 GM Wallet 的多链 EVM 已签名交易广播与生命周期管理服务。调用方提交一次，服务负责持久化、按账户 Nonce 调度、向最多三家独立付费 RPC 供应商并发广播、核实链上结果并通知上游。本文是首版开发契约。仓库当前处于设计阶段。
 
-Broadcaster 按链和账户协调 Nonce 预留。签名方取得预留后构造和签名交易，也负责签署加价替换版本。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 管理 UserOperation，可将已签名的外层链上交易交给本服务。
+Broadcaster 按链和账户协调 Nonce 预留。签名方取得预留后构造和签名交易，也负责签署加价替换版本。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
 
 ## 调用方接口
 
@@ -74,15 +74,15 @@ flowchart TD
 
 ## 付费 RPC 节点管理
 
-每个端点归属于一个稳定的 providerId 和一条链。同一供应商的多个域名、密钥或端点只占一路。每条接入链使用同一个自购节点池，**所有入池端点必须支持普通交易和 EIP-7702 Type 4 广播**。
+每个端点归属于一个稳定的 providerId 和一条链。同一供应商的多个域名、密钥或端点只占一路。每条接入链使用同一个自购节点池，**所有入池端点必须能广播普通 EVM 交易、EIP-7702 Type 4 交易，以及 ERC-4337 Bundler 签好的外层交易**。4337 外层交易调用目标链的 EntryPoint 合约，经 eth_sendRawTransaction 提交。面向钱包的 eth_sendUserOperation 由独立 Bundler 提供。
 
 | 方法与路径 | 行为 |
 |---|---|
-| POST /rpc-providers | 管理员提交 providerId、chainId、端点和凭证配置。验证实际 chainId、鉴权、查询与广播权限、普通交易和 Type 4 广播能力。全部通过才登记启用并返回 201。失败或能力无法证实时返回具体检查项与原因。 |
+| POST /rpc-providers | 管理员提交 providerId、chainId、端点和凭证配置。验证实际 chainId、鉴权、查询与广播权限、普通交易和 Type 4 广播能力，以及对已配置 EntryPoint 的 4337 外层交易广播权限。全部通过才登记启用并返回 201。失败或能力无法证实时返回具体检查项与原因。 |
 | GET /rpc-providers?chainId=… | 返回供应商和端点标识、启停状态、最近高度及观测时间、读和广播健康状况、失败计数、冷却截止时间与最近错误。凭证与 URL 中的密钥须脱敏。 |
 | PATCH /rpc-providers/{id} | 以端点记录 ID 修改配置或启停。端点、凭证或链变更时先重新准入，检查通过后原子切换；失败时原配置继续生效。停用后停止分配新请求。 |
 
-准入须有目标端点和对应凭证的能力证据。例如可使用运维提供的受控已签名测试交易，验证对应写接口接受该类型；费用及链上副作用须在准入测试安排中明确。查高度成功、能读取历史 Type 4 交易或收到通用参数错误，均不足以证明该端点有 Type 4 广播权限。
+准入须有目标端点和对应凭证的能力证据。例如可使用运维提供的受控已签名测试交易，验证对应写接口接受该类型；费用及链上副作用须在准入测试安排中明确。对 4337，按目标链登记 Bundler 使用的 EntryPoint 地址和版本，核对合约部署，并验证执行端点允许发送有效的、调用该 EntryPoint 的已签名 bundle。查高度成功、能读取历史 Type 4 交易或收到通用参数错误，均不足以证明该端点有 Type 4 广播权限。
 
 ### 每轮选点
 
@@ -162,6 +162,17 @@ flowchart TD
 
 按任一候选 Hash 查询，返回 taskId、taskState、taskOutcome、chainId、sender、nonce、queriedHash、activeHash、winningHash、consumingHash、attempts 及阻塞原因。入块附 completionBasis=BLOCK_INCLUSION、区块证据、executionStatus、receipt 和逐条 authorizations。若外部覆盖，同时返回 error、queueVersion 和 nextNonce；该快照标明版本，实时值可查询账户接口。
 
+### ERC-4337 广播与查询
+
+| 调用方 → 服务 | 接口与标识 | 职责 |
+|---|---|---|
+| 钱包 → Bundler | eth_supportedEntryPoints、eth_sendUserOperation；返回 userOpHash | 钱包选择该链上 Bundler 支持的 EntryPoint，提交签名的 UserOperation。Bundler 校验、模拟并打包。 |
+| Bundler → Broadcaster | POST /transactions，传外层 rawTransaction；返回 taskId、txHash | Bundler 可先为**外层签名账户**预留 Nonce，再签署调用 EntryPoint.handleOps 的交易。沿用同一套最多三家并发、自动重播、显式替换和入块即关闭规则。携带新 7702 授权的 bundle 使用 Type 4 并执行逐条授权诊断。 |
+| Bundler → Broadcaster | GET /transactions/{hash} 或入块通知 | Bundler 保存 userOpHash 到外层任务的关联，按 winningHash 定位实际入块版本。若发生替换或重新打包，以实际入块交易中可核实的操作为准。 |
+| 钱包 → Bundler | eth_getUserOperationReceipt(userOpHash) | 按 EntryPoint 事件核实指定操作是否入块，通过单条操作回执的 success 报告执行结果。一个 bundle 内各操作可能有不同结果。 |
+
+Broadcaster 的 next-nonce 和 nonce-reservations 只协调外层交易发送方。智能账户的 UserOperation Nonce 由对应 EntryPoint 按账户和 nonce key 管理，签名前可调用 EntryPoint.getNonce(sender, key)。外层交易 CLOSED / INCLUDED 后，Bundler 仍须按 userOpHash 核实每笔操作；外层回执成功不能证明每笔操作成功。[ERC-4337](https://eips.ethereum.org/EIPS/eip-4337) · [ERC-7769 Bundler RPC](https://eips.ethereum.org/EIPS/eip-7769)
+
 ### EIP-7702 诊断
 
 1. **提交时**区分整笔无效和个别授权可能被跳过。空授权列表等整笔格式错误直接返回；逐条预检保留索引、委托目标、可恢复的授权者地址、签名 Nonce、原因及所用区块。按协议顺序计算外层发送者 Nonce 的自增，以及同一列表里前序有效授权的影响。
@@ -189,3 +200,4 @@ flowchart TD
 | 用户自行消耗队列中某 Nonce，节点最初只报 nonce too low | 先核查全部候选。找到外部交易后原任务和通知均带冲突原因，重算 nextNonce，较高的已签名交易保持原 Nonce。 |
 | 一个区块越过多个预留和任务，仅部分候选回执已可见 | 已核实的本地交易按入块关闭，失效预留通知持有人，来源待查的任务暂停重播；新的预留从更新后的可用槽位分配。 |
 | 低位预留过期，同时旧持有人和新服务提交 | 原子回收与消费至多一方先取得槽位；已过期凭据返回 409，新持有人的占位不会被覆盖。 |
+| 4337 bundle 包含两笔操作，外层入块且执行成功，其中一笔操作执行回退 | Broadcaster 返回外层 INCLUDED 和 winningHash；Bundler 按两个 userOpHash 分别返回 success=true 和 success=false。 |
