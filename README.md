@@ -2,7 +2,7 @@
 
 GM Wallet 的多链 EVM 已签名交易广播与生命周期管理服务。调用方提交一次，服务负责持久化、按账户 Nonce 调度、向最多三家独立付费 RPC 供应商并发广播、核实链上结果并通知上游。本文是首版开发契约。仓库当前处于设计阶段。
 
-Broadcaster 按链和账户协调 Nonce 预留。签名方取得预留后构造和签名交易，也负责签署加价替换版本。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
+签名方自行查询和选取 Nonce、构造交易并签名，也负责签署加价替换版本。Broadcaster 从已签名原文恢复外层发送地址和 Nonce，按账户调度已接收任务。用户仍可持私钥在其他钱包发交易。Broadcaster 处理普通 EVM 交易和 EIP-7702 Type 4 交易，包括逐条授权诊断。独立的 ERC-4337 Bundler 接收并打包 UserOperation；Broadcaster 接收 Bundler 签好的外层交易，负责多供应商广播和入块通知。
 
 ## 调用方接口
 
@@ -10,15 +10,14 @@ Broadcaster 按链和账户协调 Nonce 预留。签名方取得预留后构造�
 
 | 方法与路径 | 输入 | 响应与副作用 |
 |---|---|---|
-| POST /transactions | rawTransaction、可选 reservationId；Type 4 可附逐条授权的预留引用 | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由不同 Hash 登记时返回 409 NONCE_CONFLICT。 |
+| POST /transactions | rawTransaction | 解析签名、链、发送方、外层 Nonce 和本地 Hash。首次持久化返回 202 及 taskId、txHash、state。重复提交相同 Hash 返回 200 及已有任务。同链、同发送方、同 Nonce 已由不同 Hash 登记时返回 409 NONCE_CONFLICT。 |
 | GET /transactions/{hash} | 原始或替换 Hash | 返回 200，包含任务阶段和结果、所查 Hash 的状态、当前调度版本、全部候选、各轮各节点结果、链上证据及 7702 诊断。未知或不可见的 Hash 返回 404。 |
 | POST /transactions/{hash}/force | reason | 对当前可调度版本立即安排一轮广播，记录操作者、时间和原因，返回 202。只跳过本地 Nonce 排序，仍受节点冷却、可用性及链上状态约束。同一轮已排队或在途时复用该轮。 |
 | POST /transactions/{hash}/replacement | rawTransaction | 用路径指定待替换的当前版本。新签名交易通过校验，且 chainId、sender、nonce 相同后，在原任务下登记新 Hash，返回 202。重复提交同一已登记替换版本返回 200。原 Hash 继续接受链上监控。 |
-| GET /accounts/{address}/queue?chainId=… | 地址、目标链 | 按外层 Nonce 升序返回未关闭任务、当前版本、排队原因和下次调度时间。返回同一账户快照的 chainNonce、nextNonce、queueVersion 和观测区块。 |
-| GET /accounts/{address}/next-nonce?chainId=… | 地址、目标链 | 200，返回 nextNonce、chainNonce、queueVersion、observedBlock。只读快照；多个服务可以读到同一个值。 |
-| POST /accounts/{address}/nonce-reservations | chainId，必传 Idempotency-Key 请求头 | 在账户锁内分配并占位，201 返回 reservationId、nonce、expiresAt、queueVersion。相同调用方、账户和幂等键重试返回原预留及其当前状态；取得新预留使用新键。 |
+| GET /accounts/{address}/queue?chainId=… | 地址、目标链 | 按外层 Nonce 升序返回未关闭任务、当前版本、排队原因和下次调度时间。队列只列已接收的任务。 |
+| GET /accounts/{address}/nonce?chainId=… | 地址、目标链，可选 blockTag（latest 或 pending） | 直接向该链健康 RPC 调用 eth_getTransactionCount。默认 latest；200 返回 chainId、address、blockTag、nonce（十进制字符串）。RPC 均不可用时返回 503 NONCE_VIEW_UNAVAILABLE。 |
 
-**冲突与错误。** 原文无法解码、签名无效、链未启用或整笔交易违反协议规则时，提交返回 4xx 和具体原因，校验失败的请求不占用 Nonce。已有 Hash 的幂等查询优先于依赖当前链状态的预检，先校验调用方访问权限。任务表唯一键为 (chainId, sender, nonce)，签名交易以 (chainId, txHash) 去重。重复提交检查与占位在同一事务内完成。并发 replacement 使用当前版本的条件更新；对过时版本提交不同的新 Hash、在核查 Nonce 消耗者或已关闭时尝试替换，以及对不可调度版本执行 force，均返回 409 和原因。到期关闭仍保留占位与历史。
+**冲突与错误。** 原文无法解码、签名无效、链未启用或整笔交易违反协议规则时，提交返回 4xx 和具体原因，校验失败的请求不占用 Nonce。已有 Hash 的幂等查询优先于依赖当前链状态的预检，先校验调用方访问权限。任务表唯一键为 (chainId, sender, nonce)，签名交易以 (chainId, txHash) 去重。Hash 幂等检查与新任务插入在同一事务内完成，唯一键冲突时重新读取已提交的任务作判定。并发 replacement 使用当前版本的条件更新；对过时版本提交不同的新 Hash、在核查 Nonce 消耗者或已关闭时尝试替换，以及对不可调度版本执行 force，均返回 409 和原因。已关闭任务保留提交历史及终止结果。
 
 **提交响应示例**（标识符省略中间字符）：
 
@@ -28,49 +27,24 @@ Broadcaster 按链和账户协调 Nonce 预留。签名方取得预留后构造�
 
 202 表示服务已持久化任务。调用方可用返回的 Hash 查询进度；自动重播、查回执和故障恢复无需调用 retry 接口。
 
-## Nonce 预留与账户排序
+## Nonce 查询与任务排序
 
-跨服务签名流程为 **原子预留 → 使用返回的 Nonce 签名 → 携带 reservationId 提交**。读取 nextNonce 适合展示和排查。预留只约束经 Broadcaster 协调的调用方；外部钱包可直接向网络提交。
-
-**计算规则。** 读取当前规范区块上的账户交易计数作为 chainNonce，并记录区块高度与 Hash。自 chainNonce 起搜索第一个没有被有效预留或本地任务占用的整数，作为 nextNonce。服务结束追踪但原签名交易仍可能上链的槽位继续保留。未提交预留过期后可填补低位缺口，因此 nextNonce 可以回落。外部 pending 交易可能只有部分节点可见；pending 视图与单个 RPC 的 nonce too low 都只触发核查。所有 Nonce 字段用十进制字符串传输。
-
-**并发与恢复。** PostgreSQL 对 (chainId, sender) 串行化分配、直接提交、到期回收和链上对账。预留与任务共用每个 Nonce 的唯一占位；登记任务时将占位从预留原子转换为任务。校验调用方、链、发送方、Nonce、预留状态与期限；其他调用方或缺少凭据的提交不能抢占有效预留。兼容已在别处签好的直接提交，但须在同一账户锁和唯一约束下检查。任务已接收后的同 Hash 重试优先幂等返回。过期或失效的 reservationId 永远不能再次消费。服务重启后从数据库恢复占位、幂等结果、版本和待发事件。
-
-| 预留状态 | 触发条件 | 下一状态与动作 |
-|---|---|---|
-| 尚无预留 | 经授权的分配请求取得账户锁，链视图可用 | RESERVED，写入归属、Nonce 和可配置的 expiresAt，同时更新队列版本。 |
-| RESERVED | 匹配的签名交易提交并持久化 | CONSUMED，记录 taskId；同一事务内保留任务占位。 |
-| RESERVED | 到期且未提交 | EXPIRED，释放本地占位并重算。迟到提交返回 409 RESERVATION_EXPIRED。 |
-| RESERVED | 已核实链上 Nonce 越过预留值 | INVALIDATED，记录观测区块并通知持有人。提交返回 409 NONCE_CONSUMED，附新的账户快照。 |
-
-**对账触发。** 有未关闭任务或预留的账户在新块到达时核查，也可由 nonce too low、入块观察和签名前分配触发。分配和提交须基于新鲜链视图；若无法可靠刷新，返回可重试的 503 NONCE_VIEW_UNAVAILABLE。并发刷新按区块标识与账户版本提交，丢弃过时结果；冲突视图重新取当前规范区块。查询返回观测区块，让调用方知道快照对应哪一块。
+签名服务可以直接向自己的 RPC 查询，也可以调用 Broadcaster 的只读接口。两者使用相同的 RPC 方法。例如，GET /accounts/{R}/nonce?chainId=1 对应 eth_getTransactionCount(R, "latest")，返回最近区块状态中的账户 Nonce。选择 pending 时返回该节点考虑本地 pending 交易后的视图，各供应商可能不同。每次查询均读 RPC，不叠加本地排队任务，不产生预留或写入账户计数器。[Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/#eth_gettransactioncount)
 
 ~~~mermaid
 flowchart TD
-    Head["新块 / nonce too low / 分配前刷新"] --> Read["按区块读 chainNonce，与账户队列对账"]
-    Read --> Check{"逐个检查低于 chainNonce 的本地槽位"}
-    Check -->|仅有预留| Inv["预留失效，通知持有人"]
-    Check -->|有任务| Who{"核查所有候选 Hash 和链上消耗者"}
-    Who -->|自己的候选入块| Own["关闭任务，返回实际上链的 Hash"]
-    Who -->|外部交易或授权消耗| Err["关闭被覆盖任务，写入冲突错误及通知"]
-    Who -->|证据不全| Hold["暂停该槽位重播，继续核查"]
-    Read --> Keep["保留未受影响的预留和已签名交易"]
-    Inv --> Sort["按 Nonce 重排，计算首个可用槽位"]
-    Own --> Sort
-    Err --> Sort
-    Hold --> Sort
-    Keep --> Sort
-    Sort --> Publish["原子提交队列版本、nextNonce 和待发事件"]
-    Publish --> Wake["唤醒可调度任务，查询返回新快照"]
-    Wake -->|GET next-nonce| Peek["仅返回快照"]
-    Wake -->|POST nonce-reservations| Lock["持账户锁校验版本，选空位并写入唯一预留"]
-    Lock --> Sign["调用方用预留 Nonce 签名"]
-    Sign --> Submit["携带 reservationId 提交，原子转换为任务占位"]
+    Read["签名方查自己的 RPC 或 GET nonce"] --> Sign["选取外层发送账户的 Nonce，签名"]
+    Sign --> Submit["POST /transactions：原子登记任务"]
+    Submit -->|相同 Hash| Existing["返回已有任务"]
+    Submit -->|不同 Hash 且任务键冲突| Conflict["409 NONCE_CONFLICT，本次提交不入队"]
+    Submit -->|新任务| Queue["按链、外层发送方和 Nonce 排队"]
+    Conflict -->|确需替换原任务| Replace["有权限的调用方显式提交 replacement"]
+    Replace --> Queue
 ~~~
 
-一个区块可推进多个 Nonce。遍历全部受影响槽位，逐笔归因；发现已越过的槽位即可更新分配下界，个别交易的归因可以稍后完成。只调整队列顺序和可调度性，已签名交易的 Nonce 保持原值。若需换 Nonce 执行业务，调用方重新预留并签名，作为新任务提交。一个账户的一次对账事务提交状态变更、队列版本、nextNonce 与 outbox；后续取得归因证据时再做版本化更新。
+数据库保存签名原文及任务键 (chainId, sender, nonce)，用于并发判重、排序和重启恢复。账户的实时 Nonce 始终通过 RPC 读取。两个服务可同时查到 20，也可能在本地任务尚未传播时都从 pending 读到 20。不同交易使用同一个 20 时只有一个普通提交能创建任务。另一笔若是独立付款，由签名方核对在途交易和队列，另选可用值重新签名；只有同一任务的有意替换才用 replacement。
 
-**例。** 链上 Nonce 为 20，本地 20、21 已登记任务，22 已预留，对外 nextNonce 为 23。用户从外部钱包发出另一笔 Nonce 20 的交易并入块后，20 的本地任务报错，21 恢复按序调度，22 的预留继续有效，nextNonce 仍是 23，queueVersion 更新。若外部交易又消耗 21、22、23，则任务 21 核实后报错、预留 22 失效，对外 nextNonce 更新为 24。
+发现外层账户的链上 Nonce 已越过本地任务时，逐笔核查候选 Hash。自己的版本入块则正常关闭；证实外部消耗则通知原提交方并重新调度剩余任务；证据不足则暂停该任务重播并继续核查。新区块、ChainScanner 地址活动或节点返回 nonce too low 均可触发核查。查询接口始终可独立从 RPC 读取，无需等待扫描进度。
 
 ## 付费 RPC 节点管理
 
@@ -113,7 +87,7 @@ flowchart TD
 
 ~~~mermaid
 flowchart TD
-    Submit["提交签名原文，校验预留或直接占位"] --> Q["QUEUED"]
+    Submit["提交签名原文，按任务唯一键判重"] --> Q["QUEUED"]
     Q -->|具备调度条件| T["TRACKING：最多三家广播，监听所有候选"]
     T -->|显式 replacement| T
     Q -->|发现 Nonce 已越过| R["RESOLVING_NONCE：暂停该槽重播"]
@@ -123,8 +97,8 @@ flowchart TD
     T -->|候选已在块内| I
     R -->|本任务任一候选在块内| I
     R -->|证实外部消耗| X["CLOSED / REPLACED_EXTERNALLY"]
-    X --> N["通知提交方，重排账户队列并更新 nextNonce"]
-    I --> A["通知提交方，更新账户队列与 nextNonce"]
+    X --> N["通知提交方，重排该账户的剩余任务"]
+    I --> A["通知提交方，唤醒该账户后续任务"]
     Q --> E["永久拒绝或期限到达时关闭"]
     T --> E
     R -->|期限到达| E
@@ -134,7 +108,7 @@ flowchart TD
 
 | 当前状态 | 转换条件 | 下一状态与动作 |
 |---|---|---|
-| 尚无任务 | 首次提交通过校验，已持久化原文、占位和调度信息 | QUEUED。重复 Hash 返回原任务；本地占位冲突返回 409 NONCE_CONFLICT；已核实链上越过提交值，且非本任务候选入块时返回 409 NONCE_CONSUMED。 |
+| 尚无任务 | 首次提交通过校验，已持久化原文、任务键和调度信息 | QUEUED。重复 Hash 返回原任务；本地任务键冲突返回 409 NONCE_CONFLICT；已核实链上越过提交值，且非本任务候选入块时返回 409 NONCE_CONSUMED。 |
 | QUEUED | 账户排序允许（或有效 force），且至少一家可发送 | TRACKING，发送首轮。缺前序 Nonce 或没有可用节点时保持 QUEUED，记录原因。 |
 | TRACKING | RPC 返回接收、拒绝、超时，或签名方提供替换交易 | 保持 TRACKING，更新对应 Hash 和节点记录。替换版本开始调度，旧版本停止主动重播，仍参与入块核查。 |
 | QUEUED / TRACKING | 规范链账户 Nonce 已大于本地交易 Nonce，尚未核实消耗者 | RESOLVING_NONCE。暂停该任务调度；查所有候选及区块。 |
@@ -160,18 +134,18 @@ flowchart TD
 
 每条节点请求从 IN_FLIGHT 转为 ACCEPTED、ALREADY_KNOWN、REJECTED 或 UNKNOWN。记录轮次、端点、供应商、时间、延迟、错误分类及脱敏原始错误。迟到响应只补充节点记录，已关闭任务保持原结果。
 
-按任一候选 Hash 查询，返回 taskId、taskState、taskOutcome、chainId、sender、nonce、queriedHash、activeHash、winningHash、consumingHash、attempts 及阻塞原因。入块附 completionBasis=BLOCK_INCLUSION、区块证据、executionStatus、receipt 和逐条 authorizations。若外部覆盖，同时返回 error、queueVersion 和 nextNonce；该快照标明版本，实时值可查询账户接口。
+按任一候选 Hash 查询，返回 taskId、taskState、taskOutcome、chainId、sender、nonce、queriedHash、activeHash、winningHash、consumingHash、attempts 及阻塞原因。入块附 completionBasis=BLOCK_INCLUSION、区块证据、executionStatus、receipt 和逐条 authorizations。外部覆盖时返回错误及链上证据。实时账户 Nonce 可另行查询。
 
 ### ERC-4337 广播与查询
 
 | 调用方 → 服务 | 接口与标识 | 职责 |
 |---|---|---|
 | 钱包 → Bundler | eth_supportedEntryPoints、eth_sendUserOperation；返回 userOpHash | 钱包选择该链上 Bundler 支持的 EntryPoint，提交签名的 UserOperation。Bundler 校验、模拟并打包。 |
-| Bundler → Broadcaster | POST /transactions，传外层 rawTransaction；返回 taskId、txHash | Bundler 可先为**外层签名账户**预留 Nonce，再签署调用 EntryPoint.handleOps 的交易。沿用同一套最多三家并发、自动重播、显式替换和入块即关闭规则。携带新 7702 授权的 bundle 使用 Type 4 并执行逐条授权诊断。 |
+| Bundler → Broadcaster | POST /transactions，传外层 rawTransaction；返回 taskId、txHash | Bundler 可先查询**外层签名账户**的 Nonce，再签署调用 EntryPoint.handleOps 的交易。沿用同一套最多三家并发、自动重播、显式替换和入块即关闭规则。携带新 7702 授权的 bundle 使用 Type 4 并执行逐条授权诊断。 |
 | Bundler → Broadcaster | GET /transactions/{hash} 或入块通知 | Bundler 保存 userOpHash 到外层任务的关联，按 winningHash 定位实际入块版本。若发生替换或重新打包，以实际入块交易中可核实的操作为准。 |
 | 钱包 → Bundler | eth_getUserOperationReceipt(userOpHash) | 按 EntryPoint 事件核实指定操作是否入块，通过单条操作回执的 success 报告执行结果。一个 bundle 内各操作可能有不同结果。 |
 
-在 ERC-4337 路径中，Bundler 为外层发送账户预留交易 Nonce；随包提供新 7702 授权时，授权账户的预留规则见下节。智能账户的 UserOperation Nonce 由对应 EntryPoint 按账户和 nonce key 管理，签名前可调用 EntryPoint.getNonce(sender, key)。外层交易 CLOSED / INCLUDED 后，Bundler 仍须按 userOpHash 核实每笔操作；外层回执成功不能证明每笔操作成功。[ERC-4337](https://eips.ethereum.org/EIPS/eip-4337) · [ERC-7769 Bundler RPC](https://eips.ethereum.org/EIPS/eip-7769)
+在 ERC-4337 路径中，Bundler 自行选定外层发送账户的交易 Nonce；随包提供新 7702 授权时，授权账户的签名规则见下节。智能账户的 UserOperation Nonce 由对应 EntryPoint 按账户和 nonce key 管理，签名前可调用 EntryPoint.getNonce(sender, key)。外层交易 CLOSED / INCLUDED 后，Bundler 仍须按 userOpHash 核实每笔操作；外层回执成功不能证明每笔操作成功。[ERC-4337](https://eips.ethereum.org/EIPS/eip-4337) · [ERC-7769 Bundler RPC](https://eips.ethereum.org/EIPS/eip-7769)
 
 ### EIP-7702 委托与后续 Gas 代付
 
@@ -182,15 +156,15 @@ flowchart TD
 | 首次设置或变更委托 | A 签署指向 D 的 7702 授权，R 将授权装入 Type 4 交易并签署外层交易。 | 授权使用 **A 的链上账户 Nonce**，外层交易使用 **R 的链上账户 Nonce**。A 自己从外部钱包发出的普通交易也消耗 A 的账户 Nonce。 |
 | 委托已生效，后续代付转账 | A 按 D 的规则签署本次转账指令，绑定目标、调用数据、金额及防重放凭据。R 签署发往 **A** 的外层交易并支付 Gas，链在 A 的账户上下文执行 D 的代码。 | 外层仍使用 **R 的链上账户 Nonce**。指令使用 D 为 A 定义的防重放机制；若采用顺序操作 Nonce，同一用户的并发签名须协调这个编号。沿用现有委托时无需再次签署 7702 授权。 |
 
-**首次授权的占位。** GM 签名流程在签署前分别为 A 的授权和 R 的外层交易预留账户 Nonce。A 的授权与 GM 内部为 A 发起的普通交易共享同一组 (chainId, address, nonce) 槽位。提交时将 R 的 reservationId 与每条授权的预留引用分开传递，按授权索引核对签名恢复的 A、链和 Nonce，将授权占位关联到该任务。若 A 的外部转账抢先入块，通知签名方重新核查授权；已经发出的 R 交易继续按其 Hash 跟踪。Broadcaster 已掌握自己提交的授权列表。ChainScanner 可沿用现有地址订阅触发对账，预留前仍核查链上状态，首版无需为此索引全网 7702 授权。
+**首次授权。** 签名方查询 A 的账户 Nonce 来签署授权，查询 R 的账户 Nonce 来签署外层交易。Broadcaster 只用 R 的外层 Nonce 作为任务排序和冲突键，从签名原文中的授权列表诊断 A 的授权。若 A 的外部转账抢先入块，通知签名方核查授权；已经发出的 R 交易继续按其 Hash 跟踪。
 
 **后续代付的调用顺序。**
 
-1. 代付服务以稳定的业务请求 ID 作为 `Idempotency-Key`，直接调用 `POST /accounts/{R}/nonce-reservations`，保存返回的 `reservationId` 和 Nonce。Broadcaster 在账户锁内完成选取和占位；`GET next-nonce` 仅用于查看。
-2. 取得 A 对本次操作的有效签名后，代付服务使用预留值构造并签署 R 的外层交易，保存业务请求、预留、已签名原文与 Hash 的关联，再携带 `reservationId` 调用 `POST /transactions`。R 的所有发送实例共用 Broadcaster 的排序器。
-3. 预留响应超时，使用原幂等键重试；提交响应超时，按原 Hash 查询或重交同一份签名原文。只有明确需要加价时才走同 Nonce 的 replacement 流程。
+1. 代付服务查询 R 的账户 Nonce，并根据自己的在途交易选值。A 为本次操作签署 D 要求的指令。
+2. 代付服务构造并签署 R 的外层交易，保存业务请求与已签名原文、Hash 的关联，调用 POST /transactions。Broadcaster 在 R 的队列中按外层 Nonce 调度。
+3. 提交响应超时则重交相同原文或查询原 Hash。另一笔付款误用相同 Nonce 时，普通提交返回 409；只有需要替换已接收任务时才提交同 Nonce 的签名替换版本。
 
-例如，R 给两笔支付分别预留 `100` 和 `101`。如果两笔都属于 A，而 D 对 A 采用顺序操作编号，签名流程还要分别协调 `7` 和 `8`，并保持执行顺序。A 用外部钱包普通转账只会推进 A 的链上账户 Nonce；已签操作仍可能因余额变化而执行失败。实际操作编号与签名字段以所部署的 D 为准。[EIP-7702 授权处理](https://eips.ethereum.org/EIPS/eip-7702#behavior) · [委托持久性](https://eips.ethereum.org/EIPS/eip-7702#persistence-of-code-delegation) · [签名与防重放](https://eips.ethereum.org/EIPS/eip-7702#security-considerations)
+例如，代付签名方为 R 的两笔付款选定 `100` 和 `101`。如果两笔都属于 A，而 D 对 A 采用顺序操作编号，签名流程还要分别协调 `7` 和 `8`，并保持执行顺序。A 用外部钱包普通转账只会推进 A 的链上账户 Nonce；已签操作仍可能因余额变化而执行失败。实际操作编号与签名字段以所部署的 D 为准。[EIP-7702 授权处理](https://eips.ethereum.org/EIPS/eip-7702#behavior) · [委托持久性](https://eips.ethereum.org/EIPS/eip-7702#persistence-of-code-delegation) · [签名与防重放](https://eips.ethereum.org/EIPS/eip-7702#security-considerations)
 
 ### EIP-7702 诊断
 
@@ -202,7 +176,7 @@ flowchart TD
 
 接收事务写入任务、签名原文和调度信息后再响应。工作实例以租约领取到期任务；重启后接手失效租约，先核查全部候选 Hash，再决定按入块关闭、等待或重播。实际 RPC 调用允许重复，数据库对任务、候选和事件去重。Redis 可用于加速，PostgreSQL 保留恢复所需的原文、状态与证据。
 
-状态变更和待发事件通过同一事务写入 outbox。消息队列或 Webhook 至少一次投递，失败可重试，消费方按 eventId 去重并按任务版本处理乱序。transaction.submitted 表示已持久化，入块时 transaction.included 和 transaction.closed 携带入块证据及独立执行状态，其他终止路径的 closed 携带对应原因，transaction.replacement_required 通知签名方加价。任务被外部覆盖时发送 transaction.nonce_conflict 及 transaction.closed，携带 taskId、本地 Hash、链、账户、Nonce、consumingHash、区块、错误码、nextNonce 和 queueVersion。未提交的预留被消耗时向持有人发送 nonce.reservation_invalidated，携带 reservationId 和对应账户快照。鉴权按接收方隔离。通知投递失败只重试通知。
+状态变更和待发事件通过同一事务写入 outbox。消息队列或 Webhook 至少一次投递，失败可重试，消费方按 eventId 去重并按任务版本处理乱序。transaction.submitted 表示已持久化，入块时 transaction.included 和 transaction.closed 携带入块证据及独立执行状态，其他终止路径的 closed 携带对应原因，transaction.replacement_required 通知签名方加价。任务被外部覆盖时发送 transaction.nonce_conflict 及 transaction.closed，携带 taskId、本地 Hash、链、账户、Nonce、consumingHash、区块和错误码。鉴权按接收方隔离。通知投递失败只重试通知。
 
 ## 首版验收示例
 
@@ -215,10 +189,8 @@ flowchart TD
 | 全部请求超时且进程重启，随后查到已上链回执 | 复用原任务，由 SUBMISSION_UNKNOWN 进入 INCLUDED，以观测到的入块证据关闭。 |
 | A 广播后显式替换为 B，先在规范区块找到 A，外层回执为 0 | 两个 Hash 均返回 CLOSED / INCLUDED、winningHash=A、executionStatus=FAILED，B 为 REPLACED。关闭后无重组恢复任务。 |
 | Type 4 外层成功但一条授权被跳过 | 外层 SUCCESS；能取得交易级证据时列出被跳过的条目和原因，证据不足时报告 UNKNOWN。 |
-| 两服务同时查询后并发预留；一个服务超时重试同一幂等键 | 查询可相同，成功预留分别占据不同 Nonce，幂等重试只取回原预留。 |
-| 用户自行消耗队列中某 Nonce，节点最初只报 nonce too low | 先核查全部候选。找到外部交易后原任务和通知均带冲突原因，重算 nextNonce，较高的已签名交易保持原 Nonce。 |
-| 一个区块越过多个预留和任务，仅部分候选回执已可见 | 已核实的本地交易按入块关闭，失效预留通知持有人，来源待查的任务暂停重播；新的预留从更新后的可用槽位分配。 |
-| 低位预留过期，同时旧持有人和新服务提交 | 原子回收与消费至多一方先取得槽位；已过期凭据返回 409，新持有人的占位不会被覆盖。 |
+| 用户自行消耗队列中某 Nonce，节点最初只报 nonce too low | 先核查全部候选。找到外部交易后原任务和通知均带冲突原因，重排剩余任务，较高的已签名交易保持原 Nonce。 |
 | 4337 bundle 包含两笔操作，外层入块且执行成功，其中一笔操作执行回退 | Broadcaster 返回外层 INCLUDED 和 winningHash；Bundler 按两个 userOpHash 分别返回 success=true 和 success=false。 |
 | 首次代付前，A 在外部钱包先花掉授权 Nonce | 标记 A 的授权需核查或重签；已经发出的 R 交易仍按外层 Hash 独立跟踪。 |
 | 同一 R 并发代付两笔，第一笔提交响应超时 | 两笔使用不同的 R 账户 Nonce；重试第一笔复用其原文和 Hash。若同属 A 且 D 采用顺序操作 Nonce，还需验证两份指令各有独立、顺序可执行的编号。 |
+| 代付地址 R 的 RPC latest 返回 20，本地队列已有尚未广播的 20 | 查询仍返回 20。另一个 Hash 普通提交同一个 20 时返回 409；查询和冲突均不改变任何账户计数器。 |
