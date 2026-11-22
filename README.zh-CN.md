@@ -7,6 +7,8 @@
 
 ---
 
+[Bitcoin 主网节点与配置](https://github.com/GMWalletApp/ChainScanner/blob/main/docs/bitcoin-nodes.zh-CN.md)
+
 ## 一笔付款如何处理
 
 钱包或支付服务签好交易后提交一次。Broadcaster 将签名原文存入 SQLite，向最多三家独立 RPC 供应商并发广播，再核实哪一笔交易入块。即使节点接收后响应超时，后台仍按原哈希核查，重启后接着处理。

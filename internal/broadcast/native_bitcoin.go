@@ -9,6 +9,8 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
+const bitcoinMainnetGenesis = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+
 type bitcoinAdapter struct{}
 
 func (bitcoinAdapter) decode(in NativeRequest) (Version, error) {
@@ -43,6 +45,13 @@ func (bitcoinAdapter) height(ctx context.Context, s *Service, p Endpoint) (int64
 		return 0, err
 	}
 	if info.Chain != "main" || info.Blocks == nil || *info.Blocks < 0 {
+		return 0, errNativeEvidence
+	}
+	var genesis string
+	if err := s.call(ctx, p, "getblockhash", []any{0}, &genesis); err != nil {
+		return 0, err
+	}
+	if genesis != bitcoinMainnetGenesis {
 		return 0, errNativeEvidence
 	}
 	return *info.Blocks, nil
@@ -89,8 +98,15 @@ func (bitcoinAdapter) lookup(ctx context.Context, s *Service, p Endpoint, hash s
 	if err = s.call(ctx, p, "getblockheader", []any{tx.BlockHash, true}, &header); err != nil {
 		return update{}, err
 	}
-	if header.Hash == "" || header.Hash != tx.BlockHash || header.Height == nil || header.Confirmations < 1 {
+	if header.Hash == "" || header.Hash != tx.BlockHash || header.Height == nil || *header.Height < 0 || header.Confirmations < 1 {
 		return update{}, errNativeEvidence
+	}
+	var active string
+	if err = s.call(ctx, p, "getblockhash", []any{*header.Height}, &active); err != nil {
+		return update{}, err
+	}
+	if active != header.Hash {
+		return nativeTracking(), nil
 	}
 	return nativeIncluded(hash, true, map[string]any{"blockHash": header.Hash, "blockNumber": *header.Height}), nil
 }

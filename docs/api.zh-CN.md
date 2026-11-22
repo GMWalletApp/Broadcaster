@@ -177,7 +177,7 @@ paymentId 由代付服务为同一笔业务付款稳定生成。按调用方、�
 
 | 网络 | 供应商 URL 与广播接口 | 查询标识与证据 |
 |---|---|---|
-| Bitcoin | Bitcoin Core JSON-RPC 2.0 网关，须启用并同步 txindex。发送用 `sendrawtransaction`。如节点使用 Basic Auth，可由私有网关注入凭证。 | 本地计算 txid，隔离见证交易同样按 txid 查询。`getrawtransaction` 与 `getblockheader` 核对活动链区块及确认数。 |
+| Bitcoin | Bitcoin Core JSON-RPC 2.0 网关，须启用并同步 txindex。发送用 `sendrawtransaction`。如节点使用 Basic Auth，可由私有网关注入凭证。 | 本地计算 txid，隔离见证交易同样按 txid 查询。核对主网创世哈希，使用 `getrawtransaction` 和 `getblockheader` 查入块，再用 `getblockhash(height)` 核对该高度当前主链上的区块。 |
 | TRON | 配置可访问 Wallet 和 WalletSolidity 的根 URL。交易按 protobuf 编码为 hex，通过 `/wallet/broadcasthex` 发送。 | txID 为原始交易数据的 SHA-256。读取固化视图的交易回执，并核对指定块中确有同一 txID。 |
 | Aptos | 配置完整的 fullnode REST API 根路径，通常以 `/v1` 结尾。将 Base64 解码后的原始 BCS 字节发送至 `/transactions`。 | 对原始签名交易按 Aptos 用户交易的域前缀计算哈希。节点校验签名和链 ID。按哈希查询，pending 继续跟踪，已提交的 user_transaction 返回账本版本及 success。 |
 | Sui | 配置 gRPC v2 的 HTTP(S) 主机 URL。使用 `ExecuteTransaction` 传递 TransactionData 和全部签名，多个签名按原样发送。 | 根据 TransactionData 原始字节计算 digest。`GetTransaction` 同时返回相同 digest、checkpoint 及 effects.status 后关闭。 |

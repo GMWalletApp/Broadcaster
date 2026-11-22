@@ -7,6 +7,8 @@
 
 ---
 
+[Bitcoin mainnet endpoints and configuration](https://github.com/GMWalletApp/ChainScanner/blob/main/docs/bitcoin-nodes.zh-CN.md)
+
 ## What happens to a payment
 
 Your wallet or payment service signs a transaction and submits it once. Broadcaster saves the signed bytes in SQLite, sends them through up to three independent RPC providers, and checks what landed. A node can time out after accepting a transaction. The worker keeps checking the original hash and resumes after a restart.

@@ -40,6 +40,7 @@ type nativeFixture struct {
 	v      Version
 	writes atomic.Int32
 	mined  atomic.Bool
+	fork   atomic.Bool
 }
 
 func newNativeFixture(t *testing.T, f Family) *nativeFixture {
@@ -91,6 +92,14 @@ func (f *nativeFixture) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch rpc.Method {
+		case "getblockhash":
+			if string(rpc.Params[0]) == "0" {
+				out = bitcoinMainnetGenesis
+			} else if f.fork.Load() {
+				out = "other"
+			} else {
+				out = "block"
+			}
 		case "getblockchaininfo":
 			out = map[string]any{"chain": "main", "blocks": 420}
 		case "getindexinfo":
@@ -274,6 +283,18 @@ func TestNativeProviderToInclusion(t *testing.T) {
 				t.Fatal("missing close event")
 			}
 		})
+	}
+}
+
+func TestBitcoinReorgDuringInclusion(t *testing.T) {
+	f := newNativeFixture(t, Bitcoin)
+	f.mined.Store(true)
+	f.fork.Store(true)
+	s := service(t, filepath.Join(t.TempDir(), "db"))
+	p := Endpoint{Network: "bitcoin", secret: endpointSecret{URL: f.endpoint()}}
+	u, e := (bitcoinAdapter{}).lookup(t.Context(), s, p, f.v.Hash)
+	if e != nil || u.state != "TRACKING" || u.outcome == "INCLUDED" {
+		t.Fatal(u, e)
 	}
 }
 
