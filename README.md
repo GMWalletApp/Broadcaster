@@ -2,10 +2,8 @@
 <h1 align="center">Broadcaster</h1>
 <p align="center"><strong>Submit a signed transaction and receive its on-chain result in your service.</strong></p>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
-<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">GM Wallet Community License 2.2</a> · 18 mainnets</p>
+<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">AGPL-3.0</a> · 18 mainnets</p>
 <p align="center"><a href="#quick-start">Quick start</a> · <a href="#networks">Networks</a> · <a href="docs/api.md">API reference</a></p>
-
-Companies whose worldwide revenue with affiliates strictly exceeds USD 1,000,000 over the preceding 12 months need a paid license, including loss-making groups. Under the community terms, release, delivery or operational deployment of a modified version requires free public access to its exact corresponding source, prominent attribution and an original-project link. For each such version, including SaaS deployments, submit the exact revision upstream by pull request or a branch as described in section 13. GM Wallet decides whether to merge it. Separate written commercial terms may apply. [License](LICENSE) · [info@gmwallet.app](mailto:info@gmwallet.app)
 
 ---
 
