@@ -2,10 +2,10 @@
 <h1 align="center">Broadcaster</h1>
 <p align="center"><strong>提交已签名交易，由 Broadcaster 广播、跟踪并将链上结果回传给提交服务。</strong></p>
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
-<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">GM Wallet Community License 2.1</a> · 18 条主网</p>
+<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">GM Wallet Community License 2.2</a> · 18 条主网</p>
 <p align="center"><a href="#快速开始">快速开始</a> · <a href="#支持的网络">支持的网络</a> · <a href="docs/api.zh-CN.md">接口文档</a></p>
 
-公司及其关联实体过去 12 个月的全球合计收入严格超过 100 万美元，即使亏损也须购买许可。按社区条款，修改版在发布、交付或上线运行时须免费向公众提供该版本的完整对应源码，显著保留指定署名及原项目链接。另行签署的商业合同可约定不同条款。 [许可](LICENSE) · [贡献者条款](CONTRIBUTING.md) · [info@gmwallet.app](mailto:info@gmwallet.app)
+公司及其关联实体过去 12 个月的全球合计收入严格超过 100 万美元，即使亏损也须购买许可。按社区条款，修改版在发布、交付或上线运行时须免费向公众提供该版本的完整对应源码，显著保留指定署名及原项目链接。每个修改版本（包括 SaaS 上线版本）还须按第 13 节通过 PR 或分支将该版本的实际修改提交给原项目，并注明提交号。GM Wallet 自行决定是否合并。另行签署的商业合同可约定不同条款。 [许可](LICENSE) · [贡献者条款](CONTRIBUTING.md) · [info@gmwallet.app](mailto:info@gmwallet.app)
 
 ---
 
