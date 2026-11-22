@@ -1,4 +1,4 @@
-<p align="center"><img src="https://github.com/GMWalletApp.png?size=96" width="80" height="80" alt="GM Wallet"></p>
+<p align="center"><img src="docs/assets/broadcaster-logo.png" width="80" height="80" alt="Broadcaster"></p>
 <h1 align="center">Broadcaster</h1>
 <p align="center"><strong>提交已签名交易，由 Broadcaster 广播、跟踪并将链上结果回传给提交服务。</strong></p>
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>

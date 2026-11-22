@@ -1,4 +1,4 @@
-<p align="center"><img src="https://github.com/GMWalletApp.png?size=96" width="80" height="80" alt="GM Wallet"></p>
+<p align="center"><img src="docs/assets/broadcaster-logo.png" width="80" height="80" alt="Broadcaster"></p>
 <h1 align="center">Broadcaster</h1>
 <p align="center"><strong>Submit a signed transaction and receive its on-chain result in your service.</strong></p>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
