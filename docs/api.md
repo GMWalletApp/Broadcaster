@@ -244,9 +244,9 @@ Cooldowns last 3, 6, 10, 15, 21, 28, 36, 45, 55 and then 60 minutes per stage. L
 
 <a id="balancekeeper"></a>
 
-## Global broadcast notifications for BalanceKeeper (proposed v1)
+## Global broadcast notifications for BalanceKeeper
 
-The shipping `clients[].webhook` delivers task events to their submitting client. The proposed integration adds one optional, operator-configured HTTPS destination and a dedicated signing secret for events across **all** submitters. Broadcaster sends transaction identifiers to this destination; BalanceKeeper owns address registration, matching and balance reads. This section specifies a future interface. [Receiver contract](https://github.com/GMWalletApp/BalanceKeeper/blob/main/docs/api.zh-CN.md#broadcaster)
+`clients[].webhook` delivers task events to their submitting client. Configure one optional, operator-configured HTTPS destination and a dedicated signing secret for events across **all** submitters. Broadcaster sends transaction identifiers to this destination; BalanceKeeper owns address registration, matching and balance reads. [Receiver contract](https://github.com/GMWalletApp/BalanceKeeper/blob/main/docs/api.zh-CN.md#broadcaster)
 
 | Event | Emit when | Identifier |
 | --- | --- | --- |
@@ -277,7 +277,16 @@ The shipping `clients[].webhook` delivers task events to their submitting client
 ]
 ```
 
-Use `Content-Type: application/json` and `X-Broadcaster-Signature: <lowercase hex HMAC-SHA256(secret, exact request body bytes)>`. Use a separate secret of at least 24 bytes per destination. An optional integration section, proposed as `broadcastNotifications` with `url` and `secret`, enables delivery. Existing builds reject this new config key until implemented.
+Use `Content-Type: application/json` and `X-Broadcaster-Signature: <lowercase hex HMAC-SHA256(secret, exact request body bytes)>`. Use a separate secret of at least 24 bytes per destination. Add this top-level section to your existing config and set the same secret in BalanceKeeper’s `broadcastSecret`. Delivery starts with qualifying observations recorded after the integration is enabled. Omit the section to disable delivery.
+
+```json
+{
+  "broadcastNotifications": {
+    "url": "https://balancekeeper.example.com/v1/notifications/broadcasts",
+    "secret": "${BROADCASTER_NOTIFICATION_SECRET}"
+  }
+}
+```
 
 **Durability.** Commit the global outbox entry in the same SQLite transaction as the first qualifying provider acknowledgement or verified inclusion. A resend or a second provider accepting the same hash reuses the logical event; a signed replacement has a new hash. Keep the global destination’s delivery state independent of submitting-client callbacks. Deliver at least once, preserve each item’s ID across retries and rebatching, and allow events to arrive out of order. An inclusion on a different canonical block gets a new event ID even for the same hash.
 

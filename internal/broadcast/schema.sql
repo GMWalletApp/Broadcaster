@@ -39,3 +39,11 @@ CREATE TABLE IF NOT EXISTS solana_origins (
  task text NOT NULL REFERENCES tasks(id), hash text NOT NULL, slot integer NOT NULL,
  PRIMARY KEY(task,hash)
 );
+
+CREATE TABLE IF NOT EXISTS broadcast_events (
+ id TEXT PRIMARY KEY, event TEXT NOT NULL, family TEXT NOT NULL, network TEXT NOT NULL,
+ hash TEXT NOT NULL, block_key TEXT NOT NULL, tx_hash TEXT NOT NULL,
+ due INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, sent INTEGER, lease TEXT,
+ UNIQUE(event,network,hash,block_key)
+);
+CREATE INDEX IF NOT EXISTS broadcast_events_due ON broadcast_events(due) WHERE sent IS NULL;

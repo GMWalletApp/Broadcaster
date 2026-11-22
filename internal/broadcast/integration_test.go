@@ -157,6 +157,8 @@ func drive(t *testing.T, s *Service) {
 
 func TestBroadcastThreeVendorsAndReplacedHashWins(t *testing.T) {
 	s := service(t, filepath.Join(t.TempDir(), "tasks.db"))
+	s.cfg.BroadcastNotifications = &GlobalWebhook{}
+
 	key := must(crypto.GenerateKey())
 	raw := rawEVM(key, 0, 1)
 	_, v, _ := decodeEVM(raw)
@@ -220,6 +222,26 @@ func TestBroadcastThreeVendorsAndReplacedHashWins(t *testing.T) {
 	q = must(s.Store.lookup(t.Context(), "merchant", EVM, "1", v.Hash))
 	if q.Winner != v.Hash || q.Execution != "FAILED" || q.Reason != "EVM_OUT_OF_GAS" || q.Versions[1].State != "REPLACED" {
 		t.Fatalf("wrong closure %+v", q)
+	}
+	rows, err := s.Store.db.Query("SELECT event,hash,tx_hash FROM broadcast_events ORDER BY rowid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for _, name := range []string{"broadcast.accepted", "broadcast.included"} {
+		var event, hash, txHash string
+		if !rows.Next() {
+			t.Fatalf("missing %s", name)
+		}
+		if err := rows.Scan(&event, &hash, &txHash); err != nil {
+			t.Fatal(err)
+		}
+		if event != name || hash != v.Hash || (event == "broadcast.included" && txHash != v.Hash) {
+			t.Fatal(event, hash, txHash)
+		}
+	}
+	if rows.Next() || rows.Err() != nil {
+		t.Fatal("unexpected extra events", rows.Err())
 	}
 }
 

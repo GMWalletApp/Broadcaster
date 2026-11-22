@@ -13,7 +13,7 @@
 
 EVM 转账按已提交任务的 Nonce 调度，替换后继续跟踪新旧哈希。Solana 代付由用户和代付方对同一消息签名；当最终确定的区块历史证实 blockhash 已过期且交易未入块，Broadcaster 向提交方报告本次广播失败。后续处理由应用决定。
 
-设计中的 BalanceKeeper 对接会把所有提交方的广播接收和入块事件发往一个全局接收端，由 BalanceKeeper 判断哪些钱包需要刷新余额。[通知接口设计](docs/api.zh-CN.md#balancekeeper)
+启用 BalanceKeeper 通知后，Broadcaster 将所有提交方的广播接收和入块事件发往一个全局接收端，由 BalanceKeeper 判断哪些钱包需要刷新余额。[通知配置与接口](docs/api.zh-CN.md#balancekeeper)
 
 ## 快速开始
 

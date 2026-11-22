@@ -105,6 +105,18 @@ func readConfig(path string) (broadcast.Config, error) {
 			}
 		}
 	}
+	if w := c.BroadcastNotifications; w != nil {
+		w.Secret = os.ExpandEnv(w.Secret)
+		u, err := url.Parse(w.URL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || len(w.Secret) < 24 {
+			return c, errors.New("broadcastNotifications requires an HTTPS URL and dedicated secret of at least 24 bytes")
+		}
+		for _, client := range c.Clients {
+			if w.Secret == client.WebhookSecret || w.Secret == client.Token {
+				return c, errors.New("use a dedicated global webhook secret")
+			}
+		}
+	}
 	return c, nil
 }
 

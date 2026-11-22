@@ -366,9 +366,9 @@ EVM 使用 eth_blockNumber 记录端点延迟、最后高度和最近推进时�
 
 <a id="balancekeeper"></a>
 
-## 向 BalanceKeeper 推送全局广播通知（v1 设计）
+## 向 BalanceKeeper 推送全局广播通知
 
-现有 `clients[].webhook` 按交易提交方投递任务事件。本设计新增一个可选的全局 HTTPS 接收端，覆盖所有提交方。运维配置一次接收 URL 和独立密钥即可。钱包的地址清单由 BalanceKeeper 自己维护。以下接口待实现。[BalanceKeeper 接收契约](https://github.com/GMWalletApp/BalanceKeeper/blob/main/docs/api.zh-CN.md#broadcaster)
+现有 `clients[].webhook` 按交易提交方投递任务事件。服务支持一个可选的全局 HTTPS 接收端，覆盖所有提交方。运维配置一次接收 URL 和独立密钥即可。钱包的地址清单由 BalanceKeeper 自己维护。[BalanceKeeper 接收契约](https://github.com/GMWalletApp/BalanceKeeper/blob/main/docs/api.zh-CN.md#broadcaster)
 
 | 事件 | 何时产生 | 哈希 |
 | --- | --- | --- |
@@ -399,7 +399,16 @@ EVM 使用 eth_blockNumber 记录端点延迟、最后高度和最近推进时�
 ]
 ```
 
-请求头为 `Content-Type: application/json` 和 `X-Broadcaster-Signature`。签名值为对原始正文使用独立密钥计算的 HMAC-SHA256 小写十六进制。设计中的可选配置为 `broadcastNotifications.url`（HTTPS）和 `broadcastNotifications.secret`（至少 24 字节）；当前版本尚不能加载该配置。
+请求头为 `Content-Type: application/json` 和 `X-Broadcaster-Signature`。签名值为对原始正文使用独立密钥计算的 HMAC-SHA256 小写十六进制。在现有配置文件的顶层加入以下字段，并将同一个环境变量配置给 BalanceKeeper 的 `broadcastSecret`。启用后，新的节点接收和入块记录会生成通知。省略此配置即可关闭投递。
+
+```json
+{
+  "broadcastNotifications": {
+    "url": "https://balancekeeper.example.com/v1/notifications/broadcasts",
+    "secret": "${BROADCASTER_NOTIFICATION_SECRET}"
+  }
+}
+```
 
 **投递。** 首笔合格的节点回执或入块证据与全局待发事件在同一 SQLite 事务内提交。同一哈希被多个节点接收或重复广播只触发一次接收事件；签名替换产生新哈希。重组后同一哈希在不同规范块重新入块，使用新的入块事件 ID。全局接收端有独立的投递进度，慢接收端不会阻塞广播或原提交方回调。允许至少一次、乱序及重新分批投递，每项保持原事件 ID。
 

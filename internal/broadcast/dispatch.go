@@ -99,6 +99,15 @@ func (s *Service) record(ctx context.Context, j dispatch, r sendResult, elapsed 
 			return e
 		}
 		if r.state == "ACCEPTED" || r.state == "ALREADY_KNOWN" {
+			if s.cfg.BroadcastNotifications != nil {
+				_, err := tx.ExecContext(ctx, `INSERT INTO broadcast_events(id,event,family,network,hash,block_key,tx_hash)
+                    SELECT ?, 'broadcast.accepted', t.family,t.network,d.hash,'',''
+                    FROM deliveries d JOIN tasks t ON t.id=d.task WHERE d.id=?
+                    ON CONFLICT(event,network,hash,block_key) DO NOTHING`, id(), j.delivery)
+				if err != nil {
+					return err
+				}
+			}
 			// Make the first acknowledgement observable while the other calls
 			// are still running. A late acknowledgement cannot undo inclusion.
 			_, e = tx.ExecContext(ctx, `UPDATE versions SET state='PENDING'

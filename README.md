@@ -13,7 +13,7 @@ Your wallet or payment service signs a transaction and submits it once. Broadcas
 
 For an EVM transfer, Broadcaster coordinates submitted nonces and watches every signed replacement. For a sponsored Solana payment, the user and fee payer sign the same message. When finalized history proves the blockhash expired without inclusion, Broadcaster reports the failed attempt to the submitting service. The application decides what happens next.
 
-The proposed BalanceKeeper integration forwards accepted and included transaction identifiers from every submitting client to one global receiver. BalanceKeeper selects the wallets to refresh. [Notification contract](docs/api.md#balancekeeper)
+The optional BalanceKeeper integration forwards accepted and included transaction identifiers from every submitting client to one global receiver. BalanceKeeper selects the wallets to refresh. [Notification contract](docs/api.md#balancekeeper)
 
 ## Quick start
 

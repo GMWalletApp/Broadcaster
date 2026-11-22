@@ -138,6 +138,9 @@ func (s *Service) Run(ctx context.Context) {
 			}
 		}
 	})
+	if s.cfg.BroadcastNotifications != nil {
+		wg.Go(func() { s.globalNotifications(ctx) })
+	}
 	// Isolate receivers: a slow merchant callback cannot delay another merchant.
 	for _, client := range s.cfg.Clients {
 		if client.Webhook != "" {

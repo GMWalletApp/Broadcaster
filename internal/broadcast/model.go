@@ -35,12 +35,18 @@ type Client struct {
 	Webhook       string `json:"webhook,omitempty"`
 	WebhookSecret string `json:"webhookSecret,omitempty"`
 }
+type GlobalWebhook struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
+}
+
 type Config struct {
-	Listen        string             `json:"listen"`
-	Networks      map[string]Network `json:"networks"`
-	Clients       []Client           `json:"clients"`
-	Workers       int                `json:"workers"`
-	TrackingHours int                `json:"trackingHours"`
+	BroadcastNotifications *GlobalWebhook     `json:"broadcastNotifications,omitempty"`
+	Listen                 string             `json:"listen"`
+	Networks               map[string]Network `json:"networks"`
+	Clients                []Client           `json:"clients"`
+	Workers                int                `json:"workers"`
+	TrackingHours          int                `json:"trackingHours"`
 }
 
 type Authorization struct {

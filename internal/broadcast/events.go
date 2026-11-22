@@ -42,25 +42,8 @@ func (s *Service) deliverOne(ctx context.Context, c Client) (bool, error) {
 		return false, e
 	}
 	body := bodyJSON(n)
-	req, e := http.NewRequestWithContext(ctx, "POST", c.Webhook, bytes.NewReader(body))
-	if e != nil {
-		return false, e
-	}
-	mac := hmac.New(sha256.New, []byte(c.WebhookSecret))
-	mac.Write(body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Broadcaster-Signature", hex.EncodeToString(mac.Sum(nil)))
-	req.Header.Set("Idempotency-Key", n.ID)
-	resp, e := s.http.Do(req)
-	ok := false
-	var retryAfter string
-	if e == nil {
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-			retryAfter = resp.Header.Get("Retry-After")
-		}
-		ok = resp.StatusCode >= 200 && resp.StatusCode < 300
-	}
+	status, retryAfter, err := s.postSigned(ctx, c.Webhook, c.WebhookSecret, n.ID, body)
+	ok := err == nil && status >= 200 && status < 300
 	if ok {
 		_, e = s.Store.db.ExecContext(ctx, "UPDATE outbox SET sent=?,token=NULL WHERE id=? AND token=?", time.Now().UnixMilli(), n.ID, token)
 	} else {
@@ -94,4 +77,26 @@ func (s *Service) notifications(ctx context.Context, c Client) {
 			return
 		}
 	}
+}
+
+func (s *Service) postSigned(ctx context.Context, url, secret, eventID string, body []byte) (int, string, error) {
+	req, e := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if e != nil {
+		return 0, "", e
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Broadcaster-Signature", hex.EncodeToString(mac.Sum(nil)))
+	req.Header.Set("Idempotency-Key", eventID)
+	resp, e := s.http.Do(req)
+	if e != nil {
+		return 0, "", e
+	}
+	defer resp.Body.Close()
+	var hint string
+	if resp.StatusCode == 429 || resp.StatusCode == 503 {
+		hint = resp.Header.Get("Retry-After")
+	}
+	return resp.StatusCode, hint, nil
 }

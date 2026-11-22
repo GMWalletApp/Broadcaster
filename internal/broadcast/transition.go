@@ -100,6 +100,11 @@ func (s *Service) finish(ctx context.Context, t Task, token string, u update) er
 				return e
 			}
 		}
+		if s.cfg.BroadcastNotifications != nil && t.Winner != "" {
+			if err := queueInclusion(ctx, tx, t); err != nil {
+				return err
+			}
+		}
 		if t.Winner != "" && t.Winner != oldWinner {
 			if e = event(ctx, tx, t, "transaction.included"); e != nil {
 				return e
