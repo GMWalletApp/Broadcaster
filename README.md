@@ -2,8 +2,10 @@
 <h1 align="center">Broadcaster</h1>
 <p align="center"><strong>Submit a signed transaction and receive its on-chain result in your service.</strong></p>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
-<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">MIT</a> · 18 mainnets</p>
+<p align="center">Go 1.26.2+ · SQLite · <a href="LICENSE">GM Wallet Community License 1.0</a> · 18 mainnets</p>
 <p align="center"><a href="#quick-start">Quick start</a> · <a href="#networks">Networks</a> · <a href="docs/api.md">API reference</a></p>
+
+Companies whose combined worldwide revenue with their affiliates is above USD 1,000,000 over the preceding 12 months must obtain a paid license, even if they operate at a loss. At or below that threshold, commercial use is permitted under the community license. Distributors must provide corresponding source. [Commercial licensing](https://github.com/GMWalletApp/Broadcaster/issues/new)
 
 ---
 
