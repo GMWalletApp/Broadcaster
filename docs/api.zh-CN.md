@@ -364,6 +364,47 @@ EVM 使用 eth_blockNumber 记录端点延迟、最后高度和最近推进时�
 
 <a id="首版验收示例"></a>
 
+<a id="balancekeeper"></a>
+
+## 向 BalanceKeeper 推送全局广播通知（v1 设计）
+
+现有 `clients[].webhook` 按交易提交方投递任务事件。本设计新增一个可选的全局 HTTPS 接收端，覆盖所有提交方。运维配置一次接收 URL 和独立密钥即可。钱包的地址清单由 BalanceKeeper 自己维护。以下接口待实现。[BalanceKeeper 接收契约](https://github.com/GMWalletApp/BalanceKeeper/blob/main/docs/api.zh-CN.md#broadcaster)
+
+| 事件 | 何时产生 | 哈希 |
+| --- | --- | --- |
+| `broadcast.accepted` | 同一签名版本第一次持久化节点的 `ACCEPTED` 或 `ALREADY_KNOWN` 回执。仅 API 入队（HTTP 202）、超时或拒绝均不触发。 | `hash` 为该版本的链原生广播标识。 |
+| `broadcast.included` | 核实实际胜出版本已入块，包括各次发送均超时、恢复后才查到入块，以及入块后执行失败的交易。 | `hash` 为胜出版本标识，另附实际链上交易 `txHash`。TON 用它关联外部消息与交易。 |
+
+**请求。** 向 BalanceKeeper 的 `POST /v1/notifications/broadcasts` 发送非空 JSON 数组。每项必填下例字段。`schemaVersion` 为整数 1，`eventId` 是重投时保持稳定的不透明标识；`family`、`network` 使用 Broadcaster 的链家族及配置键，EVM 的 network 为十进制 chain ID 字符串。`hash` 保留原生编码和大小写：Solana 用签名，Sui 用 digest，Bitcoin 用 txid，TON 用规范化外部消息哈希的十六进制。入块事件必填 `txHash`，TON 使用链上 32 字节交易哈希的标准 Base64。全局载荷只包含这些路由字段和标识。
+
+```json
+[
+  {
+    "schemaVersion": 1,
+    "eventId": "8af9bce60622455c8710516cde6d9981",
+    "event": "broadcast.accepted",
+    "family": "evm",
+    "network": "8453",
+    "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "schemaVersion": 1,
+    "eventId": "51a0053ad0c34a84834dbee02ab77d69",
+    "event": "broadcast.included",
+    "family": "evm",
+    "network": "8453",
+    "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+]
+```
+
+请求头为 `Content-Type: application/json` 和 `X-Broadcaster-Signature`。签名值为对原始正文使用独立密钥计算的 HMAC-SHA256 小写十六进制。设计中的可选配置为 `broadcastNotifications.url`（HTTPS）和 `broadcastNotifications.secret`（至少 24 字节）；当前版本尚不能加载该配置。
+
+**投递。** 首笔合格的节点回执或入块证据与全局待发事件在同一 SQLite 事务内提交。同一哈希被多个节点接收或重复广播只触发一次接收事件；签名替换产生新哈希。重组后同一哈希在不同规范块重新入块，使用新的入块事件 ID。全局接收端有独立的投递进度，慢接收端不会阻塞广播或原提交方回调。允许至少一次、乱序及重新分批投递，每项保持原事件 ID。
+
+BalanceKeeper 整批持久化后返回 204，已收到的事件也可确认。超时、429、5xx 或响应丢失时保留待投递状态并退避重试，429/503 遵循 `Retry-After`。401 或 400 时保留未确认批次并报告配置或协议错误。
+
 ## 验证与维护
 
 在仓库根目录运行以下命令。测试使用临时数据库和本地模拟 RPC。

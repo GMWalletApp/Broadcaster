@@ -242,6 +242,47 @@ Height probes measure read availability and progress against peers or the endpoi
 
 Cooldowns last 3, 6, 10, 15, 21, 28, 36, 45, 55 and then 60 minutes per stage. Later stages stay at 60. If A accepts, B already knows the transaction and C times out, the transaction stays pending and only C accrues an endpoint failure.
 
+<a id="balancekeeper"></a>
+
+## Global broadcast notifications for BalanceKeeper (proposed v1)
+
+The shipping `clients[].webhook` delivers task events to their submitting client. The proposed integration adds one optional, operator-configured HTTPS destination and a dedicated signing secret for events across **all** submitters. Broadcaster sends transaction identifiers to this destination; BalanceKeeper owns address registration, matching and balance reads. This section specifies a future interface. [Receiver contract](https://github.com/GMWalletApp/BalanceKeeper/blob/main/docs/api.zh-CN.md#broadcaster)
+
+| Event | Emit when | Identifier |
+| --- | --- | --- |
+| `broadcast.accepted` | First durable `ACCEPTED` or `ALREADY_KNOWN` provider observation for this signed candidate. Enqueuing an API submission (HTTP 202), timeouts and refusals do not qualify. | `hash` is the candidate’s native broadcast identifier. |
+| `broadcast.included` | Broadcaster verifies inclusion of the actual winner, including recovery after inconclusive sends and included transactions that revert. | Keep the winning candidate’s `hash` and add the actual chain `txHash`. On TON this resolves the external message to its transaction. |
+
+**Wire format.** POST a nonempty JSON array to the configured BalanceKeeper URL ending in `/v1/notifications/broadcasts`. Each item requires the fields below. `schemaVersion` is integer 1, `eventId` is an opaque stable ID, `family` is the Broadcaster family and `network` is its configured network key (a decimal string for EVM). Preserve native identifier encoding and case. Solana uses the signature, Sui the digest, Bitcoin the txid, and TON the hex normalized external message hash in `hash`. For inclusion, `txHash` uses the chain transaction identifier (TON: 32-byte transaction hash in standard Base64). The global payload carries only these routing fields and identifiers.
+
+```json
+[
+  {
+    "schemaVersion": 1,
+    "eventId": "8af9bce60622455c8710516cde6d9981",
+    "event": "broadcast.accepted",
+    "family": "evm",
+    "network": "8453",
+    "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "schemaVersion": 1,
+    "eventId": "51a0053ad0c34a84834dbee02ab77d69",
+    "event": "broadcast.included",
+    "family": "evm",
+    "network": "8453",
+    "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+]
+```
+
+Use `Content-Type: application/json` and `X-Broadcaster-Signature: <lowercase hex HMAC-SHA256(secret, exact request body bytes)>`. Use a separate secret of at least 24 bytes per destination. An optional integration section, proposed as `broadcastNotifications` with `url` and `secret`, enables delivery. Existing builds reject this new config key until implemented.
+
+**Durability.** Commit the global outbox entry in the same SQLite transaction as the first qualifying provider acknowledgement or verified inclusion. A resend or a second provider accepting the same hash reuses the logical event; a signed replacement has a new hash. Keep the global destination’s delivery state independent of submitting-client callbacks. Deliver at least once, preserve each item’s ID across retries and rebatching, and allow events to arrive out of order. An inclusion on a different canonical block gets a new event ID even for the same hash.
+
+The receiver returns 204 after committing the entire batch to its inbox, including already-stored events. A timeout, 429, 5xx or lost response leaves the batch pending; back off and honor `Retry-After` on 429/503. Authentication or schema failures (401/400) leave the batch unacknowledged and surface a delivery error for the operator. A slow receiver must not stall broadcasts or other callbacks.
+
 ## Verification
 
 Run from the repository root. The tests create temporary databases and use local RPC fixtures.
